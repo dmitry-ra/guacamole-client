@@ -340,6 +340,13 @@
             <version>1.0</version>
         </dependency>
         
+        <!-- Annotations used directly by the web application. -->
+        <dependency>
+            <groupId>com.google.code.findbugs</groupId>
+            <artifactId>jsr305</artifactId>
+            <version>3.0.2</version>
+        </dependency>
+
         <!-- Guava Base Libraries -->
         <dependency>
             <groupId>com.google.guava</groupId>

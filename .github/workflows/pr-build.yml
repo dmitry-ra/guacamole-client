@@ -1,29 +1,96 @@
-name: Pull request CI build
+name: Personal portal PR checks
 
-# Run build for all pull requests
 on:
   pull_request:
 
-# Limit to only one build for a given PR source branch at a time,
-# cancelling any in-progress builds
+permissions:
+  contents: read
+
 concurrency:
-  group: guacamole-client-pr-${{ github.head_ref }}
+  group: portal-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-
-  docker_build:
-    name: Run docker build
-    runs-on: ubuntu-latest
+  source-checks:
+    name: Java25 and portal source checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-
-      - name: Check out code
-        uses: actions/checkout@v3
+      - name: Check out the proposed merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Build Docker container
-        shell: sh
+          fetch-depth: 2
+      - name: Select affected build checks
+        id: scope
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          docker build --pull --no-cache --force-rm .
+          set -euo pipefail
+          git diff --name-only "$PR_BASE_SHA" HEAD > "$RUNNER_TEMP/changed-paths"
+          if grep -Eqv '^(deploy/|AGENTS\.md$)' "$RUNNER_TEMP/changed-paths" || \
+             grep -Eq '^deploy/appliance/(java/|tools/(source_build|build_extension)\.py$)' "$RUNNER_TEMP/changed-paths"; then
+            echo 'native=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'native=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Select current Java LTS
+        if: steps.scope.outputs.native == 'true'
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25.0.5'
+          overwrite-settings: false
+      - name: Verify Maven and build the selected native reactor
+        if: steps.scope.outputs.native == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --max-time 120 --retry 0 \
+            https://archive.apache.org/dist/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz \
+            -o "$RUNNER_TEMP/maven.tar.gz"
+          echo '0a1be79f02466533fc1a80abbef8796e4f737c46c6574ede5658b110899942a94db634477dfd3745501c80aef9aac0d4f841d38574373f7e2d24cce89d694f70  '"$RUNNER_TEMP/maven.tar.gz" | sha512sum --check
+          tar -xzf "$RUNNER_TEMP/maven.tar.gz" -C "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/native"
+          git archive HEAD -- . ':!deploy' ':!AGENTS.md' | tar -xf - -C "$RUNNER_TEMP/native"
+          cd "$RUNNER_TEMP/native"
+          "$RUNNER_TEMP/apache-maven-3.9.12/bin/mvn" -B -T1 \
+            -Dmaven.repo.local="$RUNNER_TEMP/m2" \
+            -Dproject.build.outputTimestamp=2026-01-01T00:00:00Z \
+            -pl guacamole,extensions/guacamole-auth-jdbc/modules/guacamole-auth-jdbc-postgresql,extensions/guacamole-auth-totp,extensions/guacamole-auth-ban \
+            -am package
+      - name: Check the appliance source available in this component
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -d deploy/appliance; then
+            # Synthetic ownership cases mock engine/service/HTTP operations.
+            # No appliance or target is started on the ephemeral runner.
+            sudo env PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONPATH="$GITHUB_WORKSPACE/deploy/appliance:$GITHUB_WORKSPACE/deploy/appliance/tools" \
+              python3 -m unittest discover -s deploy/appliance -p 'test_*.py' -v
+          fi
+          if test -d deploy/appliance/tools; then
+            sudo env PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONPATH="$GITHUB_WORKSPACE/deploy/appliance:$GITHUB_WORKSPACE/deploy/appliance/tools" \
+              python3 -m unittest discover -s deploy/appliance/tools -p 'test_*.py' -v
+          fi
+          if test -f deploy/appliance/web/test-target-selection.cjs; then
+            node --test deploy/appliance/web/test-target-selection.cjs
+          fi
+      - name: Compile and exercise the portal Java guard when present
+        if: steps.scope.outputs.native == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f deploy/appliance/java/tests/PortalProviderTest.java; then
+            portal_classpath="$(find "$RUNNER_TEMP/native" "$RUNNER_TEMP/m2" -type f -name '*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -printf '%p:')"
+            mkdir "$RUNNER_TEMP/portal-classes"
+            javac -cp "$portal_classpath" -d "$RUNNER_TEMP/portal-classes" \
+              deploy/appliance/java/*.java deploy/appliance/java/tests/PortalProviderTest.java
+            java -cp "$RUNNER_TEMP/portal-classes:$portal_classpath" org.dmitryra.guacamole.PortalProviderTest
+          fi
+
+# Standard public Linux runner only. No cache/artifact upload, package/image
+# publication, private endpoints, environment secrets or deployment operation.
