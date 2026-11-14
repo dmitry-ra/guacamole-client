@@ -1,0 +1,15 @@
+[Unit]
+Description=Owned dedicated Guacamole portal bridge and network policy
+Wants=network-online.target
+After=network-online.target libvirtd.service apparmor.service
+Before=guacamole-portal.service portal-rdp-transport.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -B /opt/guacamole-portal/network_service.py boot
+RemainAfterExit=yes
+TimeoutStartSec=180
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
