@@ -1,0 +1,69 @@
+FROM docker.io/library/ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS common
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC LANG=C.UTF-8
+COPY --chmod=0644 --from=release bootstrap-ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN printf 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";\n' >/etc/apt/apt.conf.d/99-bootstrap-ca && \
+    printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d && \
+    sed -i 's|http://archive.ubuntu.com/ubuntu/|https://snapshot.ubuntu.com/ubuntu/20261108T000000Z/|g; s|http://security.ubuntu.com/ubuntu/|https://snapshot.ubuntu.com/ubuntu/20261108T000000Z/|g' /etc/apt/sources.list.d/ubuntu.sources && \
+    apt-get -o Acquire::Check-Valid-Until=false -o APT::Update::Error-Mode=any update && apt-get install -y --no-install-recommends ca-certificates && \
+    sed -i 's|http://snapshot.ubuntu.com/|https://snapshot.ubuntu.com/|g' /etc/apt/sources.list.d/ubuntu.sources && \
+    apt-get install -y --no-install-recommends python3 postgresql-16 postgresql-client-16 libcairo2 libjpeg-turbo8 libpng16-16t64 libwebp7 libfreerdp3-3=3.32.1+dfsg-0ubuntu0.24.04.1 libfreerdp-client3-3=3.32.1+dfsg-0ubuntu0.24.04.1 libwinpr3-3=3.32.1+dfsg-0ubuntu0.24.04.1 libpango-1.0-0 libpangocairo-1.0-0 libpulse0 libssh2-1t64 libssl3t64 libuuid1 fonts-dejavu-core && \
+    groupadd -g 2000 webpg && useradd -u 2000 -g 2000 -d /data -s /usr/sbin/nologin webpg && \
+    groupadd -g 2001 webjava && useradd -u 2001 -g 2001 -d /run/web-rdp/java -s /usr/sbin/nologin webjava && \
+    groupadd -g 2002 webguacd && useradd -u 2002 -g 2002 -d /run/web-rdp/guacd -s /usr/sbin/nologin webguacd
+COPY --from=release jdk25.tar.gz /tmp/jdk25.tar.gz
+RUN mkdir /opt/java && tar xzf /tmp/jdk25.tar.gz -C /opt/java --strip-components=1 && rm /tmp/jdk25.tar.gz && /opt/java/bin/java -version
+ENV JAVA_HOME=/opt/java PATH=/opt/java/bin:$PATH
+FROM common AS builder
+RUN apt-get install -y --no-install-recommends autoconf automake build-essential pkg-config libtool libtool-bin libcairo2-dev libjpeg-turbo8-dev libpng-dev libwebp-dev freerdp3-dev=3.32.1+dfsg-0ubuntu0.24.04.1 libpango1.0-dev libpulse-dev libssh2-1-dev libssl-dev libuuid1 uuid-dev && mkdir /build
+COPY --from=release guacamole-server-source.tar.gz server-source.json /build/
+RUN mkdir /build/server && tar xzf /build/guacamole-server-source.tar.gz -C /build/server --strip-components=1 && \
+    cd /build/server && autoreconf -fi && CFLAGS=-Wno-deprecated-declarations ./configure --prefix=/opt/guacamole --disable-guaclog --without-vnc --with-ssh --without-telnet --without-kubernetes && nice -n 10 make -j2 && make install && \
+    cp /build/server-source.json /opt/guacamole/ && \
+    ldd /opt/guacamole/lib/libguac-client-rdp.so | tee /opt/guacamole/rdp-linkage.txt && \
+    grep -q libfreerdp3 /opt/guacamole/rdp-linkage.txt && ! grep -q libfreerdp2 /opt/guacamole/rdp-linkage.txt
+RUN ldd /opt/guacamole/lib/libguac-client-ssh.so | tee /opt/guacamole/ssh-linkage.txt && \
+    grep -q libssh2 /opt/guacamole/ssh-linkage.txt
+FROM common AS application
+COPY --from=builder /opt/guacamole /opt/guacamole
+RUN ldd /opt/guacamole/lib/libguac-client-ssh.so > /opt/guacamole/ssh-runtime-linkage.txt && \
+    ldd /opt/guacamole/lib/libguac-client-rdp.so > /opt/guacamole/rdp-runtime-linkage.txt && \
+    ! grep -q 'not found' /opt/guacamole/ssh-runtime-linkage.txt && \
+    ! grep -q 'not found' /opt/guacamole/rdp-runtime-linkage.txt
+COPY --from=release apache-tomcat-9.0.123.tar.gz /build/
+COPY --from=client_source guacamole.war /build/guacamole.war
+COPY --from=client_source extensions /opt/homelab-web-rdp/extensions
+COPY --from=client_source postgresql/schema /opt/homelab-web-rdp/schema
+COPY --from=client_source client-source-build.json /opt/homelab-web-rdp/client-source-build.json
+RUN mkdir -p /opt/tomcat /opt/homelab-web-rdp/lib /data /config /secrets && \
+    tar xzf /build/apache-tomcat-9.0.123.tar.gz -C /opt/tomcat --strip-components=1 && \
+    chown -R root:2001 /opt/tomcat && chmod -R g+rX,o-rwx /opt/tomcat && \
+    rm -rf /opt/tomcat/webapps/* && cp /build/guacamole.war /opt/tomcat/webapps/guacamole.war && \
+    echo /opt/guacamole/lib >/etc/ld.so.conf.d/guacamole.conf && ldconfig && \
+    dpkg-query -W -f='${Package}\t${Version}\n' >/opt/homelab-web-rdp/packages.tsv && \
+    /opt/guacamole/sbin/guacd -v && rm -rf /build /var/lib/apt/lists/* /var/lib/postgresql/*
+RUN apt-get -o Acquire::Retries=0 -o Acquire::Check-Valid-Until=false -o APT::Update::Error-Mode=any update && \
+    apt-get -o Acquire::Retries=0 install -y --no-install-recommends --only-upgrade apt=2.8.4ubuntu0.1 libapt-pkg6.0t64=2.8.4ubuntu0.1 libpcre2-8-0=10.42-4ubuntu2.2 zlib1g=1:1.3.dfsg-3.1ubuntu2.3 && \
+    dpkg-query -W -f='${Package}\t${Version}\n' >/opt/homelab-web-rdp/packages.tsv && \
+    rm -rf /var/lib/apt/lists/*
+# Jersey's package scanner does not support Tomcat's war: resource URLs.
+# Deploy the verified, source-built application as an exploded directory;
+# Java reads packaged code but cannot modify the root-owned appBase.
+RUN python3 -B -m zipfile -e /opt/tomcat/webapps/guacamole.war /opt/tomcat/webapps/guacamole && \
+    rm /opt/tomcat/webapps/guacamole.war && \
+    chown -R root:2001 /opt/tomcat/webapps/guacamole && \
+    chmod -R u=rwX,g=rX,o= /opt/tomcat/webapps/guacamole
+COPY --from=release postgresql-42.7.14.jar /opt/homelab-web-rdp/lib/postgresql.jar
+RUN sha256sum /opt/homelab-web-rdp/lib/postgresql.jar >/opt/homelab-web-rdp/jdbc-driver.sha256 && \
+    setpriv --reuid=2001 --regid=2001 --clear-groups /opt/tomcat/bin/catalina.sh version
+COPY runtime.py lifecycle.py catalog.py current_migration.py krb5-local.conf source-inputs-lock.json build-provenance.json /opt/homelab-web-rdp/
+COPY java /build/portal/java
+COPY web /build/portal/web
+COPY tools/build_image.py /build/portal/build_image.py
+RUN /opt/java/bin/javac -version && python3 -B /build/portal/build_image.py package --source /build/portal --javac /opt/java/bin/javac
+RUN rm -rf /build && chown -R root:root /opt/homelab-web-rdp && \
+    chmod -R go-w /opt/homelab-web-rdp && chmod 644 /opt/homelab-web-rdp/krb5-local.conf && \
+    python3 -B -c 'import hashlib,json,pathlib; r=pathlib.Path("/opt/homelab-web-rdp"); (r/"integrity.json").write_text(json.dumps({"schema":1,"files":{str(p.relative_to(r)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(r.rglob("*")) if p.is_file() and p.name!="integrity.json"}},sort_keys=True)+"\n")'
+ENV LD_LIBRARY_PATH=/opt/guacamole/lib GUACAMOLE_HOME=/run/web-rdp/guacamole CATALINA_HOME=/opt/tomcat CATALINA_BASE=/run/web-rdp/tomcat JAVA_HOME=/opt/java
+EXPOSE 8080
+ENTRYPOINT ["python3","-B","/opt/homelab-web-rdp/runtime.py"]
+CMD ["serve"]
