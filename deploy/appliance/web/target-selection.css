@@ -1,0 +1,30 @@
+/* Licensed under the Apache License, Version 2.0. See LICENSE. */
+
+.login-ui .login-fields .labeled-field.portal-target-labeled-field .field-header {
+    position: static;
+    z-index: auto;
+    margin: 0 0 0.35em;
+    opacity: 1;
+}
+
+.login-ui .login-fields .portal-target-labeled-field {
+    margin-bottom: 0.5em;
+}
+
+.login-ui .login-dialog .login-fields .portal-target-select select {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    min-height: 2.375em;
+    margin: 0;
+    padding: 0.5em 0.75em;
+    border: 1px solid rgba(0, 0, 0, 0.25);
+    border-radius: 0.2em;
+    background-color: white;
+    color: inherit;
+    font: inherit;
+    font-size: 0.8em;
+    line-height: normal;
+}

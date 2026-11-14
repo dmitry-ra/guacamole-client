@@ -1,0 +1,75 @@
+<!--
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ -->
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="/vendor/jquery.js"></script><script src="/vendor/angular.js"></script>
+<script src="/vendor/angular-translate.js"></script><script src="/vendor/lodash.js"></script>
+<script>angular.module('rest', []); angular.module('locale', ['pascalprecht.translate']);</script>
+<script src="/app/form/formModule.js"></script>
+<script src="/app/locale/services/translationStringService.js"></script>
+<script src="/app/form/services/formService.js"></script>
+<script src="/app/form/controllers/selectFieldController.js"></script>
+<script src="/app/form/controllers/textFieldController.js"></script>
+<script src="/app/form/controllers/passwordFieldController.js"></script>
+<script src="/app/form/directives/form.js"></script>
+<script src="/app/form/directives/formField.js"></script>
+<link rel="stylesheet" href="/app/form/styles/form-field.css">
+<link rel="stylesheet" href="/app/form/styles/form.css">
+<link rel="stylesheet" href="/app/index/styles/ui.css">
+<link rel="stylesheet" href="/app/index/styles/input.css">
+<link rel="stylesheet" href="/app/index/styles/buttons.css">
+<link rel="stylesheet" href="/app/login/styles/dialog.css">
+<link rel="stylesheet" href="/app/login/styles/input.css">
+<link rel="stylesheet" href="/app/login/styles/login.css">
+<script>
+angular.module('navigation', []).factory('userPageService',function(){return {getHomePage:angular.noop};});
+angular.module('index', ['form','navigation']);
+</script><script src='/portal/target-selection.js'></script><link rel='stylesheet' href='/portal/target-selection.css'><script>
+angular.module('fixture', ['index']).config(['$locationProvider',function(p){p.hashPrefix('');}]).config(['$translateProvider', function(p) {
+ p.translations('en', {APP:{NAME:'Guacamole',VERSION:'test'}, LOGIN:{ACTION_LOGIN:'Login',ACTION_CONTINUE:'Continue',FIELD_HEADER_USERNAME:'Username',FIELD_HEADER_PASSWORD:'Password',FIELD_HEADER_WRDP_TARGET:'Server'}});
+ p.preferredLanguage('en'); p.useSanitizeValueStrategy('escape');
+}]).controller('Fixture', ['$scope', function(s) {
+ s.remainingFields=[{name:'username',type:'USERNAME'},{name:'wrdp-target',type:'ENUM',options:['desktop-a','desktop-b','terminal-c']}];
+ s.enteredValues={}; s.relevantField={}; s.isContinuation=function(){return location.search.indexOf('continuation')>=0;}; s.login=angular.noop;
+ window.fixtureScope=s;
+}]);
+window.fixtureErrors=[]; window.addEventListener('error',function(e){window.fixtureErrors.push(e.message);});
+window.addEventListener('load', function(){setTimeout(function(){
+ try {
+ var select=document.querySelector('select'), field=select.closest('.labeled-field'), header=field.querySelector('.field-header'), user=document.querySelector('input[name=username]');
+ var r=select.getBoundingClientRect(), h=header.getBoundingClientRect(), u=user.getBoundingClientRect();
+ var result={width:innerWidth,continuation:fixtureScope.isContinuation(),selectWidth:r.width,inputWidth:u.width,headerBottom:h.bottom,selectTop:r.top,headerPosition:getComputedStyle(header).position,headerZIndex:getComputedStyle(header).zIndex,labelMatches:header.querySelector('label').htmlFor===select.id,classes:field.className,errors:[],browserErrors:window.fixtureErrors};
+ if(window.fixtureErrors.length)result.errors.push('Browser script errors');
+ if(Math.abs(r.width-u.width)>1)result.errors.push('ENUM width differs from other login fields');
+ if(h.bottom>r.top+1)result.errors.push('ENUM label overlaps the select');
+ if(getComputedStyle(header).zIndex==='-1')result.errors.push('ENUM label is behind the control');
+ result.options=Array.from(select.options).map(function(o){return o.text;});
+ result.initialValue=fixtureScope.enteredValues['wrdp-target'];
+ if(result.options.filter(function(o){return ['desktop-a','desktop-b','terminal-c'].indexOf(o)>=0;}).length!==3)result.errors.push('Three target aliases missing');
+ if(result.initialValue!=='desktop-b')result.errors.push('Direct URL not selected');
+ select.value=select.options[select.options.length-1].value; select.dispatchEvent(new Event('change',{bubbles:true}));
+ result.selectedValue=fixtureScope.enteredValues['wrdp-target'];
+ if(result.selectedValue!=='terminal-c')result.errors.push('Native Angular model did not receive selection');
+ fixtureScope.$apply(function(){fixtureScope.submitted=true;});
+ result.disabled=select.disabled;
+ if(!result.disabled)result.errors.push('Submitted form did not disable select');
+ document.getElementById('result').textContent=JSON.stringify(result);
+ }catch(e){document.getElementById('result').textContent=JSON.stringify({fatal:String(e)});}
+},800);});
+</script></head><body ng-app="fixture" ng-controller="Fixture"><div ng-include="'app/login/templates/login.html'"></div><pre id="result"></pre></body></html>

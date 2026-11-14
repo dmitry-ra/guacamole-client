@@ -1,0 +1,8 @@
+{
+    "LOGIN": {
+        "FIELD_HEADER_WRDP_TARGET": "Server"
+    },
+    "PORTAL": {
+        "ERROR_TARGET_UNAVAILABLE": "The selected target is invalid or unavailable. Open a valid target link or sign in again."
+    }
+}
