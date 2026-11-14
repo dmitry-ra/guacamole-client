@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Single-use CURRENT restore migration wrapper; no service or network changes."""
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import secrets
+import stat
+import sys
+
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+import catalog
+import current_migration
+import host
+import cold_copy
+import prepare_instance as files
+
+LABEL = 'guacamole.portal.current-migration'
+RESULT_KEYS = {'schema','phase','started_at','previous_config_sha256','config_sha256',
+    'previous_prepared_sha256','previous_connections','connections','migrated','identity_unchanged',
+    'enrolled','identity_sha256','finished_at','current_migration_sha256'}
+INSIDE = '''import hashlib,json,signal,sys
+signal.alarm(150)
+sys.path.insert(0,'/opt/homelab-web-rdp')
+import runtime
+import current_migration
+import lifecycle as life
+error=None;result=None
+try:
+ runtime.integrity()
+ source=hashlib.sha256(runtime.protected_read(runtime.ROOT/'current_migration.py')).hexdigest()
+ if source!=sys.argv[1]:raise RuntimeError('Reviewed current migration source differs from image')
+ registry,digest=runtime.configuration()
+ result=current_migration.migrate(registry,digest,'/config/previous.json')
+ result['current_migration_sha256']=source
+except BaseException as exc:error=exc
+try:life.shutdown()
+except BaseException as exc:
+ if error is None:error=exc
+ else:error.add_note('PostgreSQL cleanup failed: '+type(exc).__name__)
+if error is not None:
+ print(json.dumps({'failed':True,'error_type':type(error).__name__}),file=sys.stderr)
+ sys.exit(1)
+print(json.dumps(result,sort_keys=True))
+'''
+
+
+def require(value,reason):
+    if not value:raise RuntimeError(reason)
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def data_identity(path):
+    cold_copy.pg_directory(path)
+    value=path.lstat()
+    return {'device':value.st_dev,'inode':value.st_ino}
+
+
+def validate_restore(data,receipt_path,expected):
+    """Normal restore only; never strip or silently recreate prepared.json."""
+    host.identifier(expected)
+    require(not cold_copy.overlaps(data,host.PERSIST/'data'),
+            'CURRENT migration cannot use the fixed production DATA namespace')
+    if os.path.lexists(host.PERSIST/'data'):
+        require(data_identity(data)!=data_identity(host.PERSIST/'data'),
+                'CURRENT migration cannot alias the fixed production DATA identity')
+    raw=files.private_bytes(receipt_path,16384)
+    require(sha(raw)==expected,'Exact reviewed normal-restore receipt required')
+    receipt=json.loads(raw,object_pairs_hook=catalog.unique_object)
+    require(type(receipt.get('schema')) is int and receipt['schema']==1
+            and receipt.get('operation')=='restore' and receipt.get('phase')=='ready'
+            and receipt.get('for_migration') is False and receipt.get('legacy_receipt_archived') is False
+            and receipt.get('target')==str(data),'Completed normal CURRENT restore required')
+    source=files.literal(receipt['source'])
+    require(source.name=='data' and not cold_copy.overlaps(source.parent,data),
+            'Backup case and migration target must be independent')
+    files.protected_directory(source.parent)
+    require(data_identity(source)!=data_identity(data),'Backup and restored DATA share one identity')
+    manifest_raw=files.private_bytes(receipt_path.parent/'manifest.json',64*1024*1024)
+    require(sha(manifest_raw)==receipt.get('manifest_sha256'),'Restore manifest binding changed')
+    manifest=json.loads(manifest_raw,object_pairs_hook=catalog.unique_object)
+    backup=json.loads(files.private_bytes(source.parent/'result.json',16384),object_pairs_hook=catalog.unique_object)
+    require(backup.get('operation')=='backup' and backup.get('phase')=='ready'
+            and backup.get('target')==str(source) and backup.get('manifest_sha256')==sha(manifest_raw)
+            and sha(files.private_bytes(source.parent/'manifest.json',64*1024*1024))==sha(manifest_raw),
+            'Original completed backup and manifest must remain available')
+    original=files.literal(backup['source'])
+    require(not cold_copy.overlaps(original,data),'Migration target overlaps the original backup source DATA')
+    if os.path.lexists(original):
+        require(data_identity(original)!=data_identity(data),'Migration target aliases the original DATA identity')
+    cold_copy.validate_cluster(source,require_receipt=True)
+    cold_copy.validate_cluster(data,require_receipt=True)
+    prepared=cold_copy.prepared_receipt(data/'prepared.json')
+    value=json.loads(prepared,object_pairs_hook=catalog.unique_object)
+    require('connections' in value and 'profile' not in value,'CURRENT preparation receipt required')
+    require(manifest.get('schema')==1 and isinstance(manifest.get('entries'),dict)
+            and manifest['entries'].get('prepared.json',{}).get('sha256')==sha(prepared),
+            'Intact prepared.json must match the normal restore manifest')
+    require(cold_copy.manifest(data)==manifest,'Restored DATA differs from complete normal-restore manifest')
+    require(cold_copy.manifest(source)==manifest,'Original backup differs from its complete manifest')
+    cold_copy.stopped_and_exclusive(source)
+    return {'receipt_sha256':expected,'manifest_sha256':sha(manifest_raw),
+            'source':str(source),'original_source':str(original),'source_identity':data_identity(source),
+            'data_identity':data_identity(data),'prepared_sha256':sha(prepared)},prepared
+
+
+def container_args(image,data,bundle,secrets_path,case,run_id,profile,module_hash):
+    host.image_id(image);host.identifier(run_id,32);host.identifier(module_hash)
+    require(isinstance(profile,str) and re.fullmatch('[a-z][a-z0-9_.-]{0,95}',profile)
+            and profile!='unconfined','Explicit confined AppArmor profile required')
+    return ['run','--pull=never','--name=portal-current-migration-'+run_id[:16],
+        '--label='+LABEL+'='+run_id,'--cidfile='+str(case/'cid'),
+        '--read-only','--network=none','--cpus=2','--memory=1g','--memory-swap=1g','--pids-limit=192',
+        '--cap-drop=all',*['--cap-add='+cap for cap in ('SETUID','SETGID','CHOWN','DAC_OVERRIDE','FOWNER','KILL')],
+        '--security-opt=no-new-privileges','--security-opt=apparmor='+profile,
+        '--tmpfs=/tmp:rw,nosuid,nodev,size=64m,mode=1777','--tmpfs=/run:rw,nosuid,nodev,size=64m,mode=755',
+        '--volume='+str(data)+':/data:rw','--volume='+str(bundle)+':/config:ro',
+        '--volume='+str(secrets_path)+':/secrets:ro','--entrypoint=python3',image,'-B','-c',INSIDE,module_hash]
+
+
+def owned(cid,image,run_id):
+    value=host.one(host.engine('inspect',cid).stdout)
+    require(value.get('Id')==cid and host.inspected_image(value.get('Image'))==image
+            and value.get('Name','').lstrip('/')=='portal-current-migration-'+run_id[:16]
+            and value.get('Config',{}).get('Labels',{}).get(LABEL)==run_id,
+            'Foreign current-migration container; refuse cleanup')
+    require(type(value.get('State',{}).get('Running')) is bool,'Migration running state is unknown')
+    state=value['State']
+    require(type(state.get('Pid')) is int and (state['Pid']>0 if state['Running'] else state['Pid']==0),
+            'Migration running/PID state is inconsistent')
+    return value
+
+
+def read_cid(case):
+    """Podman creates a nonsecret0644 CID file even under a private case."""
+    files.protected_directory(case,private=True)
+    fd=os.open(case/'cid',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        info=os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
+                and stat.S_IMODE(info.st_mode) in (0o600,0o644) and info.st_size<=65,
+                'Bounded root-owned nonwritable CID file required')
+        raw=stream.read(66)
+    require(re.fullmatch(b'[a-f0-9]{64}\\n?',raw) is not None,'Exact full Podman CID required')
+    return raw.decode('ascii').rstrip('\n')
+
+
+def cleanup(case,image,run_id,result):
+    result['cleanup_phase']='confirm_cid'
+    cid=read_cid(case)
+    result['container_id']=cid
+    result['cleanup_phase']='verify_ownership'
+    value=owned(cid,image,run_id)
+    if value['State']['Running']:
+        result['cleanup_phase']='stop'
+        host.engine('stop','--time=10',cid,timeout=15)
+        value=owned(cid,image,run_id)
+        require(value['State']['Running'] is False,'Migration shutdown unconfirmed')
+    result['cleanup_phase']='remove'
+    host.engine('rm',cid)
+    result['cleanup_phase']='verify_absence'
+    code=host.engine('container','exists',cid,check=False).returncode
+    result['cleanup_exists_returncode']=code
+    require(type(code) is int and code==1,'Migration container absence requires exact exists return code1')
+    result['cleanup_phase']='verified';result['cleanup_verified']=True
+
+
+def perform(image,data,previous_config,config,secrets_path,restore_receipt,expected_restore,case,profile):
+    image=host.image_id(image)
+    data,previous_config,config,secrets_path,restore_receipt,case=map(files.literal,
+        (data,previous_config,config,secrets_path,restore_receipt,case))
+    require(not os.path.lexists(case),'New current-migration evidence directory required')
+    require(not os.path.lexists(data/current_migration.JOURNAL),'Attempted CURRENT migration target cannot be reused')
+    for first,second in ((data,case),(data,secrets_path),(data,config.parent),(data,previous_config.parent)):
+        require(not cold_copy.overlaps(first,second),'Independent DATA/config/secrets/case namespaces required')
+    files.protected_directory(case.parent)
+    files.protected_directory(secrets_path,private=True)
+    cold_copy.stopped_and_exclusive(data)
+    restore,old_raw=validate_restore(data,restore_receipt,expected_restore)
+    require(not cold_copy.overlaps(case,Path(restore['source']).parent),
+            'Migration evidence must not modify the original backup namespace')
+    previous_raw=host.network.protected_read(previous_config)
+    config_raw=host.network.protected_read(config)
+    previous=catalog.parse(json.loads(previous_raw,object_pairs_hook=catalog.unique_object))
+    registry=catalog.parse(json.loads(config_raw,object_pairs_hook=catalog.unique_object))
+    old_value=json.loads(old_raw,object_pairs_hook=catalog.unique_object)
+    require(old_value['config_sha256']==sha(previous_raw),'Previous config differs from intact prepared receipt')
+    mapping,added=current_migration.plan(previous,registry,old_value['connections'])
+    require(sha(previous_raw)!=sha(config_raw),'Changed catalog required')
+    source=Path(current_migration.__file__).absolute()
+    module_hash=sha(host.network.protected_read(source))
+    wrapper_hash=sha(host.network.protected_read(Path(__file__).absolute()))
+    inspected=host.one(host.engine('image','inspect',image).stdout)
+    require(host.inspected_image(inspected.get('Id'))==image and inspected.get('Architecture')=='amd64',
+            'Exact local amd64 migration image required')
+    for target in registry.targets:
+        name=getattr(target,'secret_file',None)
+        if name is None:name=target.password_file
+        meta=(secrets_path/name).lstat()
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid==0 and meta.st_nlink==1
+                and stat.S_IMODE(meta.st_mode)==0o600 and 0<meta.st_size<=target.secret_limit,
+                'Root-private distinct target secret files required')
+    db=(secrets_path/'db-password').lstat()
+    require(stat.S_ISREG(db.st_mode) and db.st_uid==0 and db.st_nlink==1 and stat.S_IMODE(db.st_mode)==0o600
+            and 0<db.st_size<=4096,
+            'Root-private database secret required')
+    run_id=secrets.token_hex(16)
+    files.new_directory(case)
+    result={'schema':1,'operation':'migrate-current','image':image,'data':str(data),'run_id':run_id,
+        'source_sha256':wrapper_hash,'current_migration_sha256':module_hash,'inside_sha256':sha(INSIDE.encode()),
+        'previous_config_sha256':sha(previous_raw),'config_sha256':sha(config_raw),
+        'restore':restore,'expected_connections':mapping,'added_aliases':added,
+        'passed':False,'cleanup_verified':False,'phase':'intent'}
+    host.write(case/'intent.json',result)
+    migration_error=cleanup_error=receipt_error=None
+    verified=False
+    try:
+        bundle=case/'config';files.new_directory(bundle)
+        files.write_new(bundle/'config.json',config_raw)
+        files.write_new(bundle/'previous.json',previous_raw)
+        cold_copy.stopped_and_exclusive(data)
+        require(data_identity(data)==restore['data_identity']
+                and sha(cold_copy.prepared_receipt(data/'prepared.json'))==restore['prepared_sha256'],
+                'Restored DATA or prior receipt changed before dispatch')
+        response=host.engine(*container_args(image,data,bundle,secrets_path,case,run_id,profile,module_hash),
+                             timeout=180,check=False)
+        result['command_returncode']=response.returncode
+        result['stdout_bytes']=len(response.stdout);result['stderr_bytes']=len(response.stderr)
+        result['stdout_sha256']=sha(response.stdout);result['stderr_sha256']=sha(response.stderr)
+        require(response.returncode==0 and len(response.stdout)<=32768,'CURRENT migration failed; restore a fresh target')
+        value=json.loads(response.stdout,object_pairs_hook=catalog.unique_object)
+        require(isinstance(value,dict) and set(value)==RESULT_KEYS
+                and type(value['schema']) is int and value['schema']==1,
+                'Exact safe CURRENT migration result schema required')
+        require(value.get('phase')=='ready' and value.get('migrated') is True
+                and value.get('identity_unchanged') is True and value.get('enrolled') is True
+                and value.get('connections')==mapping and value.get('config_sha256')==sha(config_raw)
+                and value.get('previous_config_sha256')==sha(previous_raw)
+                and value.get('previous_prepared_sha256')==restore['prepared_sha256']
+                and value.get('current_migration_sha256')==module_hash,
+                'Exact CURRENT migration completion unconfirmed')
+        require(value['previous_connections']==old_value['connections']
+                and all(type(i) is int for i in value['previous_connections'].values())
+                and all(type(i) is int for i in value['connections'].values())
+                and all(type(value[k]) in (int,float) and math.isfinite(value[k]) for k in ('started_at','finished_at'))
+                and 0<value['started_at']<=value['finished_at'],
+                'Typed prior mapping and actual completion timestamps required')
+        host.identifier(value.get('identity_sha256'))
+        result['migration']={key:value[key] for key in RESULT_KEYS};verified=True
+    except BaseException as error:
+        migration_error=error;result['error_type']=type(error).__name__
+    try:cleanup(case,image,run_id,result)
+    except BaseException as error:
+        cleanup_error=error;result['cleanup_error_type']=type(error).__name__
+    if verified and cleanup_error is None:
+        try:
+            cold_copy.stopped_and_exclusive(data)
+            cold_copy.validate_cluster(data,require_receipt=True)
+            expected={'schema':1,'postgres_major':16,'guacamole':'1.6.0','config_sha256':sha(config_raw),'connections':mapping}
+            require(json.loads(cold_copy.prepared_receipt(data/'prepared.json'),object_pairs_hook=catalog.unique_object)==expected,
+                    'Post-cleanup preparation receipt differs from verified migration')
+            require(data_identity(data)==restore['data_identity'],'Restored DATA identity changed during migration')
+        except BaseException as error:
+            migration_error=error;result['error_type']=type(error).__name__
+    result['passed']=verified and migration_error is None and cleanup_error is None and result['cleanup_verified']
+    result['phase']='ready' if result['passed'] else 'failed'
+    if migration_error is None and cleanup_error is not None:result['error_type']=type(cleanup_error).__name__
+    try:host.write(case/'receipt.json',result)
+    except BaseException as error:receipt_error=error
+    primary=migration_error or cleanup_error or receipt_error
+    if primary is not None:
+        if receipt_error is not None and receipt_error is not primary:
+            primary.add_note('Terminal receipt write failed: '+type(receipt_error).__name__)
+        raise primary
+    return result
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--image',required=True)
+    for name in ('data','previous-config','config','secrets','restore-receipt','directory'):
+        parser.add_argument('--'+name,required=True,type=Path)
+    parser.add_argument('--expected-restore-sha256',required=True)
+    parser.add_argument('--apparmor-profile',required=True)
+    args=parser.parse_args()
+    require(os.geteuid()==0,'Root operator required')
+    os.umask(0o077)
+    result=perform(args.image,args.data,args.previous_config,args.config,args.secrets,
+                   args.restore_receipt,args.expected_restore_sha256,args.directory,args.apparmor_profile)
+    print(json.dumps({'passed':result['passed'],'cleanup_verified':result['cleanup_verified'],
+                      'image':result['image'],'phase':result['phase']}))
+
+
+if __name__=='__main__':
+    try:main()
+    except BaseException as error:
+        print('CURRENT migration failed: '+type(error).__name__,file=sys.stderr)
+        raise SystemExit(1)
