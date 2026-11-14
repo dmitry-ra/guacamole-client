@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "portal": {
+    "username": "operator",
+    "default_target": "desktop-a",
+    "publish_target_labels": false
+  },
+  "targets": {
+    "desktop-a": {
+      "protocol": "rdp",
+      "hostname": "192.0.2.10",
+      "port": 3389,
+      "username": "desktop-user",
+      "security": "nla",
+      "certificate_fingerprint": "sha256:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab:ab",
+      "password_file": "desktop-a-password"
+    },
+    "desktop-b": {
+      "protocol": "rdp",
+      "hostname": "192.0.2.20",
+      "port": 3389,
+      "username": "desktop-user",
+      "security": "nla",
+      "certificate_fingerprint": "sha256:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd:cd",
+      "password_file": "desktop-b-password"
+    }
+  }
+}
