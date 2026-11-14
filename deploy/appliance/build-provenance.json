@@ -1,0 +1,14 @@
+{
+  "schema": 2,
+  "origin": "personal fork on apache/guacamole-client main",
+  "client_build": "tools/source_build.py compiles selected current checkout with Java25; selected artifact hashes and source tree in client-source-build.json",
+  "server_build": "pinned Git archive compiled without release1.6.0 compatibility backport; server-source.json records commit and archive hash",
+  "dependency_policy": "Use source Maven dependency graph; no legacy nested-JAR substitution. Standalone PostgreSQL driver remains pinned.",
+  "recipe_changes": [
+    "Build actual selected client WAR and JDBC/TOTP/ban modules from source.",
+    "Build pinned current server source with RDP/SSH and linkage verification.",
+    "Use hash-pinned Java25 LTS at /opt/java.",
+    "Preserve root-owned exploded webapp, gate filter, JDBC provider restriction, runtime integrity census and external data/credentials."
+  ],
+  "release_signature_boundary": "ASF signatures authenticate Tomcat release only. Fork artifacts and Git source archives are locally hash-bound, not ASF releases."
+}

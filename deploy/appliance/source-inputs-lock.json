@@ -1,0 +1,49 @@
+{
+  "apt_snapshot": "20261108T000000Z",
+  "base_image": "docker.io/library/ubuntu@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac",
+  "jdk": {
+    "distribution": "Eclipse Temurin",
+    "java_home": "/opt/java",
+    "major": 25,
+    "version": "25.0.5+8"
+  },
+  "schema": 1,
+  "server": {
+    "commit": "bb1ba8ed1414ec6a239cea265d4e9c7e23b9c6a3"
+  },
+  "sources": {
+    "apache-tomcat-9.0.123.tar.gz": {
+      "release_checksum": {
+        "sha512": "64b1130e719399c0a409e6996081433b16af8d9c89266c7aaa9849af70a1815feca91e13896f5ccc41451dc5759716d1c84882682de955822c30509de102f290"
+      },
+      "sha256": "fc780a68520ff3af3f20f972bc03a39384c766ed686dd68593fa06d098eda437",
+      "signer_fingerprint": "48F8E69F6390C9F25CFEDCD268248959359E722B",
+      "url": "https://downloads.apache.org/tomcat/tomcat-9/v9.0.123/bin/apache-tomcat-9.0.123.tar.gz"
+    },
+    "bootstrap-ca-certificates.crt": {
+      "sha256": "2e89522ad15c0874c0833ed8de5a93596acf34e6651eabbe41c5e823f11bc8e9",
+      "url": "file:///etc/ssl/certs/ca-certificates.crt"
+    },
+    "guacamole-server-source.tar.gz": {
+      "sha256": "e4d96474e59021c48c6adb9fac1106af33ca94ff5d0bf0eec7c5336620332598",
+      "url": "https://codeload.github.com/apache/guacamole-server/tar.gz/bb1ba8ed1414ec6a239cea265d4e9c7e23b9c6a3"
+    },
+    "jdk25.tar.gz": {
+      "sha256": "68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb",
+      "size": 141341188,
+      "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz"
+    },
+    "postgresql-42.7.14.jar": {
+      "remote_checksum": {
+        "sha1": "0e7c94ce80cb1dd9875ff44ffe6a40a8aaa3eefd"
+      },
+      "sha256": "73914527305a40cce504b0d3d90b23caf565136912d607ae8ae7c5895512332c",
+      "sha512": "2a7c94c3f86f7ad6cfa16a964fe79dec8b122449679c8bbdb18f7052593349c2d11dd07992034de88d6effd840e2edf5ea8542e947de19905c75677d0dd44abc",
+      "url": "https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.14/postgresql-42.7.14.jar"
+    },
+    "server-source.json": {
+      "sha256": "973ee387bd486701f76e27f240c59d4312d2f895577a31c138a96d78f23560de",
+      "url": "local:reviewed-server-source-receipt"
+    }
+  }
+}
