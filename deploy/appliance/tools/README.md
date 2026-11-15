@@ -88,7 +88,13 @@
   an independently normal-restored CURRENT tree. Preserves intact prior receipt,
   every existing RDP ID/parameter and account/TOTP rows; exact-image/source/
   restore binding, network-none isolation and verified owned cleanup. No live
-  source, legacy receipt stripping, authentication or service changes. See
+  source, legacy receipt stripping, authentication or service changes. Isolated
+  label privacy may archive only a verified completed historical SSH-append
+  journal on the independent restored copy: exact four-file/intent/result/
+  prior-current preparation binding, whole restore revalidation, durable
+  single-use archival intent and atomic no-replace rename preserve all bytes
+  and receipt hashes. Failed/incomplete/mismatched history and archive replay
+  refuse. The native runtime module is unchanged. See
   ../MIGRATION.md; actual PostgreSQL/SSH acceptance remains an operator gate.
 - test_current_cid.py and reconcile_current_cleanup.py: root-private case CID
   metadata checks accept Podman's nonsecret root0644 CID file while rejecting
@@ -115,6 +121,16 @@
 - test_current_image_cleanup.py: inert uncertain-dispatch cleanup regressions,
   including absent CID files, wrong ownership and engine errors; original
   dispatch exceptions remain primary. No engine or native database calls.
+- test_current_privacy_history.py: root-only real PG append then genuine normal
+  stopped backup/independent restore and host-wrapper label-privacy regression.
+  Requires an already installed inactive appliance service and loaded enforcing
+  profile; never installs/alters them. Creates exact-owned network-none producers
+  and a real stopped source-mount consumer for backup provenance, removes only
+  those containers, retains original/backup/history bytes and checks actual
+  restored census/identity/sequence. Use `--image EXACT_SHA256 --directory NEW_CASE
+  --backup-service guacamole-portal.service --apparmor-profile LOADED_PROFILE`;
+  retain evidence; case removal needs separate cleanup authority. No target
+  authentication, live DATA, public route or production promotion claim.
 - ../current_migration.py, ../test_current_migration.py and test_migrate_current.py:
   protocol-aware transaction guards, complete old/new census, old-receipt
   archive and finalize-after-verification, plus inert replay/identity/drift/
