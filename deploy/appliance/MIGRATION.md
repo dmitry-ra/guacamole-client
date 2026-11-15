@@ -301,13 +301,40 @@ config are archived under root-private `/data/current-migration` before any SQL.
 Only after these checks may `prepared.json` be atomically replaced and its new
 config/mapping binding confirmed. Source backup and original DATA are untouched.
 
-This version accepts a fresh restore without a previous `current-migration`
-journal. Every attempted destination is single-use, including failures before
-SQL, uncertain commits and terminal-storage failures. Do not delete the journal
-or reuse a failed target. A future catalog extension from a historical migrated
-tree requires a separately reviewed procedure; this version does not silently
-adopt old migration journals. Rehearse again from a new normal restore of the
-untouched original backup before a production promotion.
+A fresh restore without a previous `current-migration` journal is accepted.
+For the isolated label-hiding transition only, the host wrapper also accepts a
+verified completed historical SSH-append journal. It first validates the whole
+normal restore and untouched backup, then binds all four root-private journal
+files to the prior intent, successful terminal result, prior archived catalog
+and preparation, and the actual current preparation/IDs. It records a new
+single-use wrapper intent before atomically moving that journal without
+replacement to `current-migration-history` inside the independent restored
+copy. All four original bytes/inodes and hashes are retained. The original
+backup and production DATA are never changed by this archival.
+
+The separate `current-migration-history-intent.json` burns a partial archival
+attempt. Existing history/archive intent, failed, incomplete, linked, changed
+or mismatched journals refuse. Append requests still cannot adopt a historical
+journal. Every attempted destination remains single-use, including failures
+before SQL, uncertain commits and terminal-storage failures. Never delete a
+journal or reuse a failed target; restore a new independent copy instead.
+
+Before using privacy after a historical append, run the real host-wrapper
+regression with an exact local image, a genuinely installed inactive appliance
+unit and loaded enforcing profile. It creates only synthetic data and owned
+network-none producer/stopped-consumer containers; it does not install or alter
+units/profiles, connect targets, or fabricate backup/restore receipts:
+
+```sh
+sudo python3 -B tools/test_current_privacy_history.py \
+  --image "$EXACT_CURRENT_CANDIDATE_IMAGE" --directory "$NEW_HISTORY_FIXTURE_CASE" \
+  --backup-service guacamole-portal.service --apparmor-profile "$ENFORCING_PROFILE"
+```
+
+The fixture performs an actual PG append, a normal stopped backup/independent
+restore, the host privacy wrapper and a real PG census/identity/sequence check.
+Retain its receipt and original/backup bytes. It is not target authentication,
+host installation, public HTTPS acceptance or a production promotion proof.
 
 Container cleanup requires the exact full CID, fresh name/run label, immutable
 image and consistent running/PID state. Missing ownership never permits a blind

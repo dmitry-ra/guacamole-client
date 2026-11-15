@@ -284,6 +284,34 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(any(c[0]=='run' for c in self.calls))
             path.write_bytes(old)
 
+    @unittest.skipUnless(os.geteuid()==0,'Actual root-private journal metadata test')
+    def test_privacy_archives_only_after_normal_manifest_validation_and_durable_intent(self):
+        import shutil
+        template=HistoryTests();template.setUp();self.addCleanup(template.doCleanups)
+        _,current=configurations();hidden=copy.deepcopy(current)
+        hidden['portal']['publish_target_labels']=False
+        self.old_raw=json.dumps(current).encode();self.new_raw=json.dumps(hidden).encode()
+        self.old_prepared=template.prepared;self.prepared=self.old_prepared
+        self.restore['prepared_sha256']=migration.sha(self.old_prepared)
+        migration.validate_restore.return_value=(self.restore,self.old_prepared)
+        self.result_changes={'previous_connections':self.mapping}
+        shutil.copytree(template.journal,self.data/migration.current_migration.JOURNAL)
+        original_engine=self.engine
+        def engine(*args,**kwargs):
+            if args[0]=='run':
+                self.assertEqual(migration.validate_restore.call_count,2)
+                self.assertIn('intent.json',self.receipts)
+                self.assertTrue((self.data/migration.HISTORY_INTENT).exists())
+                for name,raw in template.raw.items():
+                    self.assertEqual((self.data/migration.HISTORY/name).read_bytes(),raw)
+            return original_engine(*args,**kwargs)
+        migration.host.engine.side_effect=engine
+        result=self.perform()
+        self.assertTrue(result['passed'])
+        self.assertEqual(result['prior_journal_archive']['files'],
+                         {name:migration.sha(raw) for name,raw in template.raw.items()})
+        self.assertTrue((self.case/'history-archived.json').exists())
+
     def test_existing_attempt_or_current_journal_cannot_replay(self):
         self.case.mkdir()
         with self.assertRaisesRegex(RuntimeError,'New current-migration'):self.perform()
@@ -291,6 +319,130 @@ class ControllerTests(unittest.TestCase):
         self.case=self.root/'new-case';(self.data/migration.current_migration.JOURNAL).mkdir()
         with self.assertRaisesRegex(RuntimeError,'cannot be reused'):self.perform()
         migration.host.engine.assert_not_called()
+
+
+@unittest.skipUnless(os.geteuid()==0,'Actual root-private journal metadata test')
+class HistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.data=Path(self.temp.name)/'data';self.data.mkdir(mode=0o700)
+        self.journal=self.data/migration.current_migration.JOURNAL;self.journal.mkdir(mode=0o700)
+        old,current=configurations()
+        self.previous=migration.catalog.parse(current)
+        hidden=copy.deepcopy(current);hidden['portal']['publish_target_labels']=False
+        self.registry=migration.catalog.parse(hidden)
+        old_raw=json.dumps(old).encode();current_raw=json.dumps(current).encode()
+        self.mapping={'desktop-a':7,'desktop-b':42,'terminal-c':43}
+        old_prepared=json.dumps({'schema':1,'postgres_major':16,'guacamole':'1.6.0',
+            'config_sha256':migration.sha(old_raw),'connections':{'desktop-a':7,'desktop-b':42}}).encode()
+        self.prepared=json.dumps({'schema':1,'postgres_major':16,'guacamole':'1.6.0',
+            'config_sha256':migration.sha(current_raw),'connections':self.mapping}).encode()
+        intent={'schema':1,'phase':'intent','started_at':1,
+            'previous_config_sha256':migration.sha(old_raw),'config_sha256':migration.sha(current_raw),
+            'previous_prepared_sha256':migration.sha(old_prepared),
+            'previous_connections':{'desktop-a':7,'desktop-b':42},'connections':self.mapping}
+        result={**intent,'phase':'ready','migrated':True,'identity_unchanged':True,'enrolled':True,
+                'identity_sha256':'a'*64,'finished_at':2}
+        self.raw={'intent.json':json.dumps(intent).encode(),'result.json':json.dumps(result).encode(),
+                  'previous-config.json':old_raw,'previous-prepared.json':old_prepared}
+        self.reset()
+
+    def reset(self):
+        for name,raw in self.raw.items():
+            path=self.journal/name;path.write_bytes(raw);path.chmod(0o600)
+
+    def proof(self):
+        return migration.completed_history(self.data,self.previous,self.registry,self.prepared,[])
+
+    def test_completed_append_archived_by_rename_with_all_four_bytes_and_inodes_retained(self):
+        proof=self.proof()
+        identities={name:(self.journal/name).stat().st_ino for name in self.raw}
+        migration.archive_history(self.data,proof)
+        self.assertFalse(self.journal.exists())
+        for name,raw in self.raw.items():
+            path=self.data/migration.HISTORY/name
+            self.assertEqual(path.read_bytes(),raw)
+            self.assertEqual(path.stat().st_ino,identities[name])
+            self.assertEqual(proof['files'][name],migration.sha(raw))
+        with self.assertRaisesRegex(RuntimeError,'archive.*cannot'):self.proof()
+
+    def test_missing_extra_failed_or_unbound_prior_journal_is_refused_without_changes(self):
+        result=json.loads(self.raw['result.json'])
+        variants=[{'phase':'failed'},{'enrolled':False},{'identity_unchanged':False},
+                  {'finished_at':True},{'finished_at':float('inf')},{'started_at':True},
+                  {'config_sha256':'b'*64},{'previous_prepared_sha256':'b'*64},
+                  {'connections':{'desktop-a':7,'desktop-b':42,'terminal-c':44}},
+                  {'identity_sha256':'invalid'}]
+        for changes in variants:
+            (self.journal/'result.json').write_text(json.dumps({**result,**changes}))
+            with self.subTest(changes=changes),self.assertRaises((RuntimeError,ValueError)):self.proof()
+            self.assertFalse((self.data/migration.HISTORY).exists())
+        self.reset();(self.journal/'result.json').unlink()
+        with self.assertRaisesRegex(RuntimeError,'four-file'):self.proof()
+        self.reset();(self.journal/'extra').write_text('retained')
+        with self.assertRaisesRegex(RuntimeError,'four-file'):self.proof()
+
+    def test_archive_or_append_replay_and_changed_journal_are_refused(self):
+        with self.assertRaisesRegex(RuntimeError,'outside flag-only'):
+            migration.completed_history(self.data,self.previous,self.registry,self.prepared,['new'])
+        proof=self.proof()
+        (self.journal/'intent.json').write_text('{}')
+        with self.assertRaisesRegex(RuntimeError,'changed before archival'):
+            migration.archive_history(self.data,proof)
+        self.assertTrue(self.journal.exists())
+        self.reset();(self.data/migration.HISTORY).mkdir()
+        with self.assertRaisesRegex(RuntimeError,'archive.*cannot'):self.proof()
+        with self.assertRaisesRegex(RuntimeError,'archive cannot'):migration.archive_history(self.data,proof)
+
+    def test_atomic_archive_never_replaces_even_empty_destination_created_after_check(self):
+        proof=self.proof();(self.data/migration.HISTORY).mkdir()
+        with patch.object(migration.os.path,'lexists',return_value=False):
+            with self.assertRaises(FileExistsError):migration.archive_history(self.data,proof)
+        self.assertTrue(self.journal.exists())
+        self.assertEqual(list((self.data/migration.HISTORY).iterdir()),[])
+
+    def test_prior_archival_intent_burns_destination_even_without_completed_rename(self):
+        (self.data/migration.HISTORY_INTENT).write_text('{}')
+        with self.assertRaisesRegex(RuntimeError,'archival attempt cannot'):self.proof()
+        self.assertTrue(self.journal.exists())
+
+    def test_symlink_hardlink_and_nonprivate_metadata_are_refused(self):
+        target=self.journal/'previous-config.json'
+        raw=target.read_bytes();target.chmod(0o644)
+        with self.assertRaisesRegex(RuntimeError,'root-private'):self.proof()
+        target.chmod(0o600);linked=self.data/'linked';os.link(target,linked)
+        with self.assertRaisesRegex(RuntimeError,'single|root-private'):self.proof()
+        linked.unlink();target.unlink();outside=self.data/'outside';outside.write_bytes(raw);outside.chmod(0o600)
+        target.symlink_to(outside)
+        with self.assertRaises(OSError):self.proof()
+
+    def test_previous_archived_config_or_prepared_and_current_prepared_must_all_bind(self):
+        for name in ('previous-config.json','previous-prepared.json','intent.json'):
+            raw=json.loads(self.raw[name])
+            raw['unexpected']='changed'
+            (self.journal/name).write_text(json.dumps(raw))
+            with self.subTest(name=name),self.assertRaises((RuntimeError,ValueError)):self.proof()
+            self.reset()
+        current=json.loads(self.prepared);current['config_sha256']='f'*64
+        with self.assertRaisesRegex(RuntimeError,'current preparation'):
+            migration.completed_history(self.data,self.previous,self.registry,json.dumps(current).encode(),[])
+
+
+class NativeHistoryPreparationTests(unittest.TestCase):
+    def test_native_history_inputs_exercise_real_append_then_only_visibility_change(self):
+        import test_current_privacy_history as fixture
+        before,appended,hidden=map(json.loads,fixture.configurations())
+        self.assertTrue(before['portal']['publish_target_labels'])
+        self.assertTrue(appended['portal']['publish_target_labels'])
+        self.assertFalse(hidden['portal']['publish_target_labels'])
+        hidden['portal']['publish_target_labels']=True
+        self.assertEqual(hidden,appended)
+        old,current=map(migration.catalog.parse,(before,appended))
+        ids={target.alias:i for i,target in enumerate(old.targets,1)}
+        mapping,added=migration.current_migration.plan(old,current,ids)
+        self.assertEqual(added,['terminal-c'])
+        self.assertEqual(mapping,{'desktop-a':1,'desktop-b':2,'terminal-c':3})
+        compile(fixture.VERIFY,'native-history-verify','exec')
 
 
 if __name__=='__main__':unittest.main()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Single-use CURRENT restore migration wrapper; no service or network changes."""
 import argparse
+import ctypes
 import hashlib
 import json
 import math
@@ -110,6 +111,103 @@ def validate_restore(data,receipt_path,expected):
             'data_identity':data_identity(data),'prepared_sha256':sha(prepared)},prepared
 
 
+
+HISTORY = 'current-migration-history'
+HISTORY_INTENT = HISTORY+'-intent.json'
+HISTORY_FILES = {'intent.json', 'result.json', 'previous-config.json', 'previous-prepared.json'}
+INTENT_KEYS = {'schema','phase','started_at','previous_config_sha256','config_sha256',
+               'previous_prepared_sha256','previous_connections','connections'}
+
+
+def journal_bytes(data, name=current_migration.JOURNAL):
+    """Read the exact completed journal through one no-follow directory FD."""
+    fd = os.open(data/name, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        meta = os.fstat(fd)
+        require(meta.st_uid == 0 and meta.st_gid == 0 and stat.S_IMODE(meta.st_mode) == 0o700,
+                'Root-private prior journal required')
+        require(set(os.listdir(fd)) == HISTORY_FILES, 'Exact four-file prior journal required')
+        result = {}
+        for name in sorted(HISTORY_FILES):
+            child = os.open(name, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK, dir_fd=fd)
+            with os.fdopen(child,'rb') as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_gid == 0
+                        and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+                        and 0 < info.st_size <= 65536, 'Bounded root-private journal file required')
+                raw = stream.read(65537)
+                require(len(raw) == info.st_size and os.fstat(stream.fileno()) == info,
+                        'Prior journal changed during read')
+                result[name] = raw
+        return result, (meta.st_dev,meta.st_ino)
+    finally: os.close(fd)
+
+
+def completed_history(data, previous, registry, prepared, added):
+    """Only a proven completed SSH append may precede flag-only privacy."""
+    require(not os.path.lexists(data/HISTORY) and not os.path.lexists(data/HISTORY_INTENT),
+            'Existing journal archive or archival attempt cannot be reused')
+    if not os.path.lexists(data/current_migration.JOURNAL): return None
+    require(not added and previous.publish_target_labels is True and registry.publish_target_labels is False,
+            'Attempted CURRENT migration target cannot be reused outside flag-only privacy')
+    raw, identity = journal_bytes(data)
+    values = {name:json.loads(value,object_pairs_hook=catalog.unique_object) for name,value in raw.items()}
+    intent,result = values['intent.json'],values['result.json']
+    require(isinstance(intent,dict) and set(intent)==INTENT_KEYS
+            and isinstance(result,dict) and set(result)==RESULT_KEYS-{'current_migration_sha256'},
+            'Exact prior intent and native result schema required')
+    require(type(intent['schema']) is int and intent['schema']==1 and intent['phase']=='intent'
+            and type(result['schema']) is int and result['schema']==1 and result['phase']=='ready'
+            and all(result[key] is True for key in ('migrated','identity_unchanged','enrolled')),
+            'Completed successful prior migration required')
+    require(all(result[key]==intent[key] for key in INTENT_KEYS-{'phase'}),
+            'Prior intent and completion differ')
+    require(all(type(result[k]) in (int,float) and math.isfinite(result[k]) for k in ('started_at','finished_at'))
+            and type(intent['started_at']) in (int,float) and 0<result['started_at']<=result['finished_at'],
+            'Finite typed prior completion timestamps required')
+    host.identifier(result['identity_sha256'])
+    require(all(isinstance(result[key],dict) and all(type(i) is int for i in result[key].values())
+                for key in ('previous_connections','connections')), 'Typed prior connection mappings required')
+    old_registry = catalog.parse(values['previous-config.json'])
+    old_prepared = values['previous-prepared.json']
+    require(isinstance(old_prepared,dict) and old_prepared=={
+        'schema':1,'postgres_major':16,'guacamole':'1.6.0',
+        'config_sha256':sha(raw['previous-config.json']), 'connections':result['previous_connections']}
+        and type(old_prepared['schema']) is int and type(old_prepared['postgres_major']) is int
+        and isinstance(old_prepared['connections'],dict)
+        and all(type(i) is int for i in old_prepared['connections'].values()),
+        'Archived prior config and preparation binding differs')
+    mapping, appended = current_migration.plan(old_registry,previous,result['previous_connections'])
+    current = json.loads(prepared,object_pairs_hook=catalog.unique_object)
+    require(appended and mapping==result['connections']==current['connections']
+            and result['config_sha256']==current['config_sha256']
+            and result['previous_config_sha256']==sha(raw['previous-config.json'])
+            and result['previous_prepared_sha256']==sha(raw['previous-prepared.json']),
+            'Prior completed append does not bind current preparation')
+    return {'archive':HISTORY,'files':{name:sha(value) for name,value in raw.items()},
+            'directory_identity':list(identity)}
+
+
+def archive_history(data, proof):
+    require(not os.path.lexists(data/HISTORY), 'Existing journal archive cannot be reused')
+    raw,identity = journal_bytes(data)
+    require(list(identity)==proof['directory_identity']
+            and {name:sha(value) for name,value in raw.items()}==proof['files'],
+            'Prior journal changed before archival')
+    # Linux host-only atomic no-replace: even an empty archive may not be overwritten.
+    rename = ctypes.CDLL(None,use_errno=True).renameat2
+    rename.argtypes = [ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100,os.fsencode(data/current_migration.JOURNAL),-100,os.fsencode(data/HISTORY),1):
+        code=ctypes.get_errno()
+        raise OSError(code,os.strerror(code))
+    files.fsync_directory(data)
+    archived,archived_identity=journal_bytes(data,HISTORY)
+    require(list(archived_identity)==proof['directory_identity']
+            and {name:sha(value) for name,value in archived.items()}==proof['files'],
+            'Archived journal verification failed')
+
+
 def container_args(image,data,bundle,secrets_path,case,run_id,profile,module_hash):
     host.image_id(image);host.identifier(run_id,32);host.identifier(module_hash)
     require(isinstance(profile,str) and re.fullmatch('[a-z][a-z0-9_.-]{0,95}',profile)
@@ -176,7 +274,6 @@ def perform(image,data,previous_config,config,secrets_path,restore_receipt,expec
     data,previous_config,config,secrets_path,restore_receipt,case=map(files.literal,
         (data,previous_config,config,secrets_path,restore_receipt,case))
     require(not os.path.lexists(case),'New current-migration evidence directory required')
-    require(not os.path.lexists(data/current_migration.JOURNAL),'Attempted CURRENT migration target cannot be reused')
     for first,second in ((data,case),(data,secrets_path),(data,config.parent),(data,previous_config.parent)):
         require(not cold_copy.overlaps(first,second),'Independent DATA/config/secrets/case namespaces required')
     files.protected_directory(case.parent)
@@ -193,6 +290,7 @@ def perform(image,data,previous_config,config,secrets_path,restore_receipt,expec
     require(old_value['config_sha256']==sha(previous_raw),'Previous config differs from intact prepared receipt')
     mapping,added=current_migration.plan(previous,registry,old_value['connections'])
     require(sha(previous_raw)!=sha(config_raw),'Changed catalog required')
+    history=completed_history(data,previous,registry,old_raw,added)
     source=Path(current_migration.__file__).absolute()
     module_hash=sha(host.network.protected_read(source))
     wrapper_hash=sha(host.network.protected_read(Path(__file__).absolute()))
@@ -216,11 +314,20 @@ def perform(image,data,previous_config,config,secrets_path,restore_receipt,expec
         'source_sha256':wrapper_hash,'current_migration_sha256':module_hash,'inside_sha256':sha(INSIDE.encode()),
         'previous_config_sha256':sha(previous_raw),'config_sha256':sha(config_raw),
         'restore':restore,'expected_connections':mapping,'added_aliases':added,
-        'passed':False,'cleanup_verified':False,'phase':'intent'}
+        'passed':False,'cleanup_verified':False,'phase':'intent','prior_journal_archive':history}
     host.write(case/'intent.json',result)
     migration_error=cleanup_error=receipt_error=None
     verified=False
     try:
+        if history is not None:
+            # The original restore manifest is checked BEFORE changing any path.
+            cold_copy.stopped_and_exclusive(data)
+            validate_restore(data,restore_receipt,expected_restore)
+            current_migration.json_new(data/HISTORY_INTENT,{
+                'schema':1,'phase':'intent','case':str(case),'run_id':run_id,
+                'image':image,'restore_sha256':expected_restore,'history':history})
+            archive_history(data,history)
+            host.write(case/'history-archived.json',history)
         bundle=case/'config';files.new_directory(bundle)
         files.write_new(bundle/'config.json',config_raw)
         files.write_new(bundle/'previous.json',previous_raw)
@@ -266,6 +373,11 @@ def perform(image,data,previous_config,config,secrets_path,restore_receipt,expec
             require(json.loads(cold_copy.prepared_receipt(data/'prepared.json'),object_pairs_hook=catalog.unique_object)==expected,
                     'Post-cleanup preparation receipt differs from verified migration')
             require(data_identity(data)==restore['data_identity'],'Restored DATA identity changed during migration')
+            if history is not None:
+                archived,identity=journal_bytes(data,HISTORY)
+                require(list(identity)==history['directory_identity']
+                        and {name:sha(raw) for name,raw in archived.items()}==history['files'],
+                        'Retained history changed during native migration')
         except BaseException as error:
             migration_error=error;result['error_type']=type(error).__name__
     result['passed']=verified and migration_error is None and cleanup_error is None and result['cleanup_verified']
