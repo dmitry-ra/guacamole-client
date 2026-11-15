@@ -425,11 +425,17 @@ HTTP, cookie path, explicit alias behavior and unknown-alias404 semantics.
 Validate nginx syntax before its reviewed reload; no RDP or guacd public port
 is part of this change.
 
-Every generated portal location explicitly sends CSP `frame-ancestors 'none'`,
+Every generated portal UI/authentication location explicitly sends CSP `frame-ancestors 'none'`,
 `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, no-store and
 no-referrer, including redirects and errors. Verify effective response headers
 and top-level native login rendering; a configuration-text check alone is not
-a framing test. Nginx location-level `add_header` replaces ordinary inherited
+a framing test. The exact static empty native resize document
+`/desktop/app/app/element/templates/blank.html` alone uses `frame-ancestors 'self'`
+and `SAMEORIGIN`, with GET/HEAD only and the same ready/no-store/nosniff guards.
+Native Guacamole embeds that script-free, data-free document as an object;
+blocking it can prevent resize callbacks and refreshed client connections.
+No prefix, portal page, API response or client UI receives that exception.
+Nginx location-level `add_header` replaces ordinary inherited
 server/http headers: repeat any additional reviewed site policy, such as HSTS,
 in those locations rather than assuming parent inheritance. The renderer does
 not enable a host-wide HSTS or subdomain policy implicitly.
