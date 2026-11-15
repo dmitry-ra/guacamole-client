@@ -35,9 +35,11 @@ def render(registry, port):
         result += redirect('/desktop/connect/'+target.alias, base+'#/?wrdp-target='+target.alias)
     # Unknown aliases must never silently open the configured default.
     result += 'location ^~ /desktop/connect/ {\n    return 404;\n'+headers+'}\n'
-    def proxy(path, upstream, authentication=False):
-        text = 'location ^~ '+path+' {\n'+gate
+    def proxy(path, upstream, authentication=False, resize_document=False):
+        text = 'location '+('= ' if resize_document else '^~ ')+path+' {\n'+gate
         text += '    if ($uri ~ "[%;]") { return 404; }\n'
+        if resize_document:
+            text += '    limit_except GET { deny all; }\n'
         if authentication:
             text += '    limit_req zone=guacamole_portal_auth burst=10 nodelay;\n    limit_req_status 429;\n'
         text += f'    proxy_pass http://127.0.0.1:{port}/guacamole/{upstream};\n'
@@ -49,12 +51,21 @@ def render(registry, port):
     proxy_request_buffering off;
     proxy_cookie_path /guacamole/ /desktop/app/;
 '''
-        if not authentication:
+        if not authentication and not resize_document:
             text += '''    proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_read_timeout 600s;
 '''
-        return text+headers+'}\n'
+        selected_headers = headers
+        if resize_document:
+            # Native guacResize embeds ONLY this static empty document as an
+            # object. Denying its same-origin ancestors prevents resize events
+            # and can leave refreshed native clients permanently IDLE.
+            selected_headers = headers.replace("frame-ancestors 'none'", "frame-ancestors 'self'")
+            selected_headers = selected_headers.replace('X-Frame-Options "DENY"', 'X-Frame-Options "SAMEORIGIN"')
+        return text+selected_headers+'}\n'
+    result += proxy('/desktop/app/app/element/templates/blank.html',
+                    'app/element/templates/blank.html', resize_document=True)
     result += proxy('/desktop/app/api/tokens', 'api/tokens', True)
     result += proxy('/desktop/app/', '')
     return result
