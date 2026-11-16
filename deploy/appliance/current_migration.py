@@ -4,6 +4,7 @@ No legacy normalization, account recreation, remote authentication or recovery
 of a failed destination is provided. Importing this module has no effects.
 """
 import copy
+from dataclasses import replace
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import time
 import catalog
 
 JOURNAL = 'current-migration'
+TRANSFER_JOURNAL = 'rdp-transfer-migration'
 MAX_ID = 2147483647
 IDENTITY_QUERY = "SELECT json_build_object('entities',(SELECT json_agg(row_to_json(e) ORDER BY entity_id) FROM guacamole_entity e),'users',(SELECT json_agg(row_to_json(u) ORDER BY user_id) FROM guacamole_user u),'attributes',(SELECT json_agg(row_to_json(a) ORDER BY user_id,attribute_name) FROM guacamole_user_attribute a));"
 
@@ -43,6 +45,18 @@ def target_signature(target):
     return (protocol(target), target.label, target.parameters(),secret_file)
 
 
+def transfer_changes(previous, registry):
+    old = {target.alias:target for target in previous.targets}
+    new = {target.alias:target for target in registry.targets}
+    return sorted(alias for alias in set(old) & set(new)
+                  if (old[alias].enable_drive, old[alias].clipboard_buffer_size)
+                  != (new[alias].enable_drive, new[alias].clipboard_buffer_size))
+
+
+def journal_name(previous, registry):
+    return TRANSFER_JOURNAL if transfer_changes(previous, registry) else JOURNAL
+
+
 def plan(previous, registry, mapping):
     """Allow an SSH append or an isolated true-to-false label transition."""
     previous.parameters(mapping)
@@ -52,6 +66,17 @@ def plan(previous, registry, mapping):
         require(getattr(previous, name) == getattr(registry, name), 'Existing portal settings must remain unchanged')
     old = {target.alias:target for target in previous.targets}
     new = {target.alias:target for target in registry.targets}
+    transfers = transfer_changes(previous, registry)
+    if transfers:
+        require(set(old) == set(new) and previous.publish_target_labels == registry.publish_target_labels,
+                'File transfer cannot change targets or label visibility')
+        for alias, target in old.items():
+            require(replace(target, enable_drive=new[alias].enable_drive,
+                            clipboard_buffer_size=new[alias].clipboard_buffer_size) == new[alias],
+                    'File transfer cannot change endpoint, trust or credentials')
+            if alias in transfers:
+                require(protocol(target) == 'rdp', 'File transfer setting requires RDP')
+        return dict(mapping), []
     require(set(old) <= set(new), 'Existing targets cannot be removed or renamed')
     for alias, target in old.items():
         require(target_signature(target) == target_signature(new[alias]), 'Existing target parameters or secret reference changed')
@@ -79,6 +104,12 @@ def normalize(state):
 def expected_snapshot(before, registry, mapping, added):
     result = copy.deepcopy(before)
     entity = result['entities'][0][0]
+    for target in registry.targets:
+        if target.alias in added:
+            continue
+        ident = mapping[target.alias]
+        result['parameters'] = [row for row in result['parameters'] if row[0] != ident]
+        result['parameters'].extend([ident,key,value] for key,value in target.parameters().items())
     for target in registry.targets:
         if target.alias not in added: continue
         ident = mapping[target.alias]
@@ -111,9 +142,20 @@ def transaction(runtime, registry, mapping, added, before, after):
     identity = '('+IDENTITY_QUERY.removesuffix(';')+')::jsonb'
     identity_guard = ('BEGIN IF '+identity+' IS DISTINCT FROM (SELECT value FROM portal_current_identity_guard) '
                       "THEN RAISE EXCEPTION 'Identity or TOTP changed'; END IF; END;")
+    updates = []
+    for target in registry.targets:
+        ident = mapping[target.alias]
+        old = sorted(row for row in before['parameters'] if row[0] == ident)
+        new = sorted(row for row in after['parameters'] if row[0] == ident)
+        if target.alias not in added and old != new:
+            updates.append('DELETE FROM guacamole_connection_parameter WHERE connection_id=' + str(ident) + ';')
+            updates.extend('INSERT INTO guacamole_connection_parameter VALUES(' + str(ident) + ','
+                           +runtime.sql(key)+','+runtime.sql(value)+');'
+                           for key,value in target.parameters().items())
     return ('BEGIN;\nLOCK TABLE '+','.join(sorted(set(tables)))+' IN ACCESS EXCLUSIVE MODE;\n'
             'CREATE TEMP TABLE portal_current_identity_guard ON COMMIT DROP AS SELECT '+identity+' AS value;\n'
             +census_guard(before,'Prior complete census changed')
+            +'\n'.join(updates)+'\n'
             +(runtime.target_sql(registry,mapping,set(added))+'\n' if added else '')
             +census_guard(after,'Appended complete census changed')
             +'DO '+runtime.sql(identity_guard)+';\nCOMMIT;')
@@ -194,7 +236,7 @@ def migrate(registry, config_digest, previous_config_path):
     new_mapping, added = plan(previous,registry,mapping)
     require(config_digest != previous_digest,'Changed supported catalog required')
     require(prepared_bytes(runtime.DATA) == old_raw,'Prior receipt changed during validation')
-    journal = runtime.DATA/JOURNAL
+    journal = runtime.DATA/journal_name(previous, registry)
     journal.mkdir(mode=0o700)  # No exist_ok: never replay an attempted destination.
     os.chmod(journal,0o700);fsync_directory(runtime.DATA)
     write_new(journal/'previous-prepared.json',old_raw)

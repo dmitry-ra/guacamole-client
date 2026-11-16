@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cold_copy
+import current_migration
 
 ROOT = '/opt/homelab-web-rdp'
 LABEL = 'org.dmitryra.portal.current-pg-fixture'
@@ -56,6 +57,8 @@ try:
  result['census_sha256']=hashlib.sha256(json.dumps(current_migration.normalize(census),sort_keys=True).encode()).hexdigest()
  result['sequence']=life.pg_sql('SELECT last_value,is_called FROM guacamole_connection_connection_id_seq;',app=True)
  result['labels_hidden']=registry.publish_target_labels is False
+ result['drive_paths']={target.alias:target.parameters().get('drive-path') for target in registry.targets if target.protocol=='rdp'}
+ result['clipboard_budgets']={target.alias:target.clipboard_buffer_size for target in registry.targets if target.protocol=='rdp'}
  print(json.dumps(result))
 finally:life.shutdown()
 '''
@@ -143,6 +146,14 @@ def fixture_configuration(mode, examples):
         after = json.loads(before)
         after['portal']['publish_target_labels'] = False
         return before, (json.dumps(after, sort_keys=True)+'\n').encode()
+    if mode == 'file-transfer':
+        before = (examples/'config-ssh.json').read_bytes()
+        after = json.loads(before)
+        for target in after['targets'].values():
+            if target['protocol'] == 'rdp':
+                target['enable_drive'] = True
+                target['clipboard_buffer_size'] = 33554432
+        return before, (json.dumps(after, sort_keys=True)+'\n').encode()
     raise ValueError('Unsupported native migration fixture mode')
 
 
@@ -150,7 +161,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image',required=True)
     parser.add_argument('--directory',required=True,type=Path)
-    parser.add_argument('--mode',choices=('append-ssh','hide-labels'),default='append-ssh',
+    parser.add_argument('--mode',choices=('append-ssh','hide-labels','file-transfer'),default='append-ssh',
                         help='Use hide-labels only with an image containing the reviewed privacy migration')
     args=parser.parse_args()
     assert os.geteuid()==0
@@ -195,8 +206,15 @@ def main():
             assert result['census_sha256']==prepared['census_sha256']
             assert result['identity_sha256']==prepared['identity_sha256']
             assert result['sequence']==prepared['sequence']
+        if args.mode=='file-transfer':
+            assert result['connections']==prepared['connections']
+            assert result['identity_sha256']==prepared['identity_sha256']
+            assert result['sequence']==prepared['sequence']
+            assert result['drive_paths']=={'desktop-a':'/transfers/desktop-a','desktop-b':'/transfers/desktop-b'}
+            assert result['clipboard_budgets']=={'desktop-a':33554432,'desktop-b':33554432}
         assert result['identity_unchanged'] and result['enrolled']
-        assert (restored/'current-migration/previous-prepared.json').read_bytes()==(source/'prepared.json').read_bytes()
+        journal = current_migration.TRANSFER_JOURNAL if args.mode=='file-transfer' else current_migration.JOURNAL
+        assert (restored/journal/'previous-prepared.json').read_bytes()==(source/'prepared.json').read_bytes()
         assert not (restored/'pgdata/postmaster.pid').exists()
         cold_copy.stopped_and_exclusive(restored)
         receipt.update(passed=True,cleanup_verified=True,

@@ -290,7 +290,12 @@ def perform(image,data,previous_config,config,secrets_path,restore_receipt,expec
     require(old_value['config_sha256']==sha(previous_raw),'Previous config differs from intact prepared receipt')
     mapping,added=current_migration.plan(previous,registry,old_value['connections'])
     require(sha(previous_raw)!=sha(config_raw),'Changed catalog required')
-    history=completed_history(data,previous,registry,old_raw,added)
+    if current_migration.journal_name(previous,registry) == current_migration.TRANSFER_JOURNAL:
+        require(not os.path.lexists(data/current_migration.TRANSFER_JOURNAL),
+                'Attempted file transfer migration cannot be reused')
+        history=None
+    else:
+        history=completed_history(data,previous,registry,old_raw,added)
     source=Path(current_migration.__file__).absolute()
     module_hash=sha(host.network.protected_read(source))
     wrapper_hash=sha(host.network.protected_read(Path(__file__).absolute()))

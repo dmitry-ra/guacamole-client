@@ -32,6 +32,33 @@ def mixed_configuration():
 
 
 class CatalogTests(unittest.TestCase):
+    def test_file_transfer_is_opt_in_and_target_scoped(self):
+        value = configuration()
+        before = catalog.parse(value)
+        value['targets']['desktop-a']['enable_drive'] = True
+        after = catalog.parse(value)
+        params = after.target('desktop-a').parameters()
+        self.assertEqual(params['enable-drive'], 'true')
+        self.assertEqual(params['drive-path'], '/transfers/desktop-a')
+        self.assertEqual(params['drive-name'], 'Files')
+        self.assertEqual(params['create-drive-path'], 'true')
+        self.assertEqual(after.target('desktop-b').parameters(), before.target('desktop-b').parameters())
+        for key in ('hostname', 'port', 'username', 'domain', 'security', 'cert-fingerprints', 'password'):
+            self.assertEqual(params[key], before.target('desktop-a').parameters()[key])
+        for invalid in ('true', 1, None):
+            value['targets']['desktop-a']['enable_drive'] = invalid
+            with self.assertRaises(ValueError):
+                catalog.parse(value)
+
+    def test_clipboard_budget_is_explicit_bounded_and_does_not_change_old_defaults(self):
+        value = configuration()
+        self.assertNotIn('clipboard-buffer-size', catalog.parse(value).target('desktop-a').parameters())
+        value['targets']['desktop-a']['clipboard_buffer_size'] = 33554432
+        self.assertEqual(catalog.parse(value).target('desktop-a').parameters()['clipboard-buffer-size'], '33554432')
+        for invalid in (True, '33554432', 262143, 52428801, None):
+            value['targets']['desktop-a']['clipboard_buffer_size'] = invalid
+            with self.assertRaises(ValueError):catalog.parse(value)
+
     def test_mixed_schema_preserves_rdp_and_exposes_typed_ssh(self):
         old = catalog.parse(configuration())
         new = catalog.parse(mixed_configuration())

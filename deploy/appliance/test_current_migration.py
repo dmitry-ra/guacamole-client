@@ -41,6 +41,46 @@ class PlanningTests(unittest.TestCase):
         old,new=configurations();self.old=catalog.parse(old);self.new=catalog.parse(new)
         self.mapping={'desktop-a':7,'desktop-b':42}
 
+    def test_file_transfer_only_migration_preserves_every_other_census(self):
+        old, _ = configurations()
+        old['portal']['publish_target_labels'] = False
+        new = copy.deepcopy(old)
+        new['targets']['desktop-a']['enable_drive'] = True
+        new['targets']['desktop-a']['clipboard_buffer_size'] = 33554432
+        previous, registry = catalog.parse(old), catalog.parse(new)
+        mapping, added = migration.plan(previous, registry, self.mapping)
+        self.assertEqual(mapping, self.mapping)
+        self.assertEqual(added, [])
+        self.assertEqual(migration.journal_name(previous, registry), migration.TRANSFER_JOURNAL)
+        before = state(previous, mapping)
+        after = migration.expected_snapshot(before, registry, mapping, added)
+        self.assertTrue(runtime.validate_snapshot(registry, mapping, after))
+        for key in set(before) - {'parameters'}:
+            self.assertEqual(migration.normalize(before)[key], after[key])
+        self.assertEqual([row for row in after['parameters'] if row[0] == 42],
+                         [row for row in migration.normalize(before)['parameters'] if row[0] == 42])
+        query = migration.transaction(runtime, registry, mapping, added, before, after)
+        self.assertIn('DELETE FROM guacamole_connection_parameter WHERE connection_id=7;', query)
+        self.assertNotIn('DELETE FROM guacamole_connection_parameter WHERE connection_id=42;', query)
+        self.assertIn("'drive-path','/transfers/desktop-a'", query)
+        self.assertIn("'clipboard-buffer-size','33554432'", query)
+        self.assertIn('Identity or TOTP changed', query)
+
+    def test_file_transfer_rejects_combined_endpoint_credential_and_visibility_changes(self):
+        old, _ = configurations()
+        for field, value in (('hostname','192.0.2.99'), ('username','other'),
+                             ('password_file','other-password'), ('domain','other')):
+            new = copy.deepcopy(old)
+            new['targets']['desktop-a']['enable_drive'] = True
+            new['targets']['desktop-a'][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                migration.plan(catalog.parse(old), catalog.parse(new), self.mapping)
+        new = copy.deepcopy(old)
+        new['targets']['desktop-a']['enable_drive'] = True
+        new['portal']['publish_target_labels'] = False
+        with self.assertRaises(RuntimeError):
+            migration.plan(catalog.parse(old), catalog.parse(new), self.mapping)
+
     def test_only_append_ssh_above_maximum_preserving_rdp_exactly(self):
         mapping,added=migration.plan(self.old,self.new,self.mapping)
         self.assertEqual(mapping,{'desktop-a':7,'desktop-b':42,'terminal-c':43})

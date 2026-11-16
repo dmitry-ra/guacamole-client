@@ -10,6 +10,15 @@ from pathlib import Path
 import re
 import stat
 
+CLIPBOARD_MIN_BYTES = 262144
+CLIPBOARD_MAX_BYTES = 52428800
+
+
+def clipboard_size(value):
+    if type(value) is not int or not CLIPBOARD_MIN_BYTES <= value <= CLIPBOARD_MAX_BYTES:
+        raise ValueError('Clipboard size is outside the supported native range')
+    return value
+
 
 def fields(value, required, optional=()):
     if not isinstance(value, dict) or set(value) - (set(required) | set(optional)):
@@ -58,6 +67,8 @@ class Target:
     protocol: str = 'rdp'
     host_key: str = ''
     command: str = ''
+    enable_drive: bool = False
+    clipboard_buffer_size: int = CLIPBOARD_MIN_BYTES
 
     @property
     def secret_parameter(self):
@@ -89,15 +100,21 @@ class Target:
             return {'hostname': self.hostname, 'port': str(self.port), 'username': self.username,
                     'host-key': self.host_key, 'private-key': '${' + self.secret_token + '}',
                     'command': self.command, 'enable-sftp': 'false'}
-        return {
+        parameters = {
             "hostname": self.hostname, "port": str(self.port),
             "username": self.username, "domain": self.domain,
             "security": self.security, "cert-fingerprints": self.certificate,
             "password": "${" + self.password_token + "}",
-            "enable-drive": "false", "enable-printing": "false",
+            "enable-drive": str(self.enable_drive).lower(), "enable-printing": "false",
             "resize-method": "display-update", "enable-font-smoothing": "true",
             "client-name": "WEB-RDP",
         }
+        if self.enable_drive:
+            parameters.update({"drive-name": "Files", "drive-path": "/transfers/" + self.alias,
+                               "create-drive-path": "true"})
+        if self.clipboard_buffer_size != CLIPBOARD_MIN_BYTES:
+            parameters['clipboard-buffer-size'] = str(self.clipboard_buffer_size)
+        return parameters
 
 
 @dataclass(frozen=True)
@@ -186,7 +203,7 @@ def parse(value):
         protocol = obj.get('protocol')
         if protocol == 'rdp':
             fields(obj, {'protocol', 'hostname', 'port', 'username', 'certificate_fingerprint',
-                         'password_file'}, {'label', 'domain', 'security'})
+                         'password_file'}, {'label', 'domain', 'security', 'enable_drive', 'clipboard_buffer_size'})
         elif protocol == 'ssh' and value['schema_version'] == 2:
             fields(obj, {'protocol', 'hostname', 'port', 'username', 'host_key', 'private_key_file',
                          'command'}, {'label'})
@@ -210,7 +227,9 @@ def parse(value):
             if domain != '':
                 text(domain)
             targets.append(Target(name, text(obj.get('label', name), 100), str(address), number,
-                                  text(obj['username']), domain, security, certificate, reference))
+                                  text(obj['username']), domain, security, certificate, reference,
+                                  enable_drive=boolean(obj.get('enable_drive', False)),
+                                  clipboard_buffer_size=clipboard_size(obj.get('clipboard_buffer_size', CLIPBOARD_MIN_BYTES))))
         else:
             ssh_username = text(obj['username'], 32)
             if re.fullmatch('[a-z_][a-z0-9_-]{0,31}', ssh_username) is None:

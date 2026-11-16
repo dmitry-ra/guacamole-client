@@ -216,6 +216,8 @@ def selection():
             raise RuntimeError('Reviewed release input changed')
     data = directory(PERSIST / 'data', uid=2000, gid=2000, mode=0o700)
     directory(PERSIST / 'secrets', mode=0o700)
+    if any(target.enable_drive for target in targets.targets):
+        directory(PERSIST / 'transfers', uid=2002, gid=2002, mode=0o700)
     # Runtime validates individual secret contents. Host never reads credentials.
     limits = {'db-password': 4096}
     for target in targets.targets:
@@ -264,11 +266,13 @@ def network_bootstrap():
     command(['/usr/bin/python3', '-B', ROOT / 'network_service.py', 'boot'], timeout=90)
 
 
-def container_args(release, cfg, run_id):
+def container_args(release, cfg, run_id, *, enable_transfer=False):
     identifier(run_id, 32)
     internal_port = image_backend_port(cfg)
     logs = STATE / ('logs-' + run_id)
     engine_logs = STATE / ('engine-logs-' + run_id)
+    transfers = (['--volume=' + str(PERSIST / 'transfers') + ':/transfers:rw']
+                 if enable_transfer else [])
     return [PODMAN, 'run', '--detach', '--name=' + NAME, '--pull=never', '--restart=no',
             '--label=' + LABEL + '=1', '--label=' + LABEL + '.run=' + run_id,
             '--read-only', '--memory=2g', '--memory-swap=2g', '--cpus=2', '--pids-limit=384',
@@ -281,6 +285,7 @@ def container_args(release, cfg, run_id):
             '--log-driver=k8s-file', '--log-opt=max-size=64k', '--log-opt=path=' + str(engine_logs / 'entrypoint.log'),
             '--volume=' + str(logs) + ':/run/web-rdp/diagnostics:rw',
             '--volume=' + str(PERSIST / 'data') + ':/data:rw',
+            *transfers,
             '--volume=' + str(CONFIG.parent) + ':/config:ro',
             '--volume=' + str(PERSIST / 'secrets') + ':/secrets:ro',
             '--network=' + release['podman_network'], '--ip=' + cfg.source_ipv4,
@@ -453,7 +458,8 @@ def run():
               'creation_uncertain': True}
     write(STATE / 'current.json', record)
     try:
-        result = command(container_args(release, cfg, run_id), timeout=15)
+        transfers = any(target.enable_drive for target in catalog.load(CONFIG).targets)
+        result = command(container_args(release, cfg, run_id, enable_transfer=transfers), timeout=15)
         cid = identifier(result.stdout.decode().strip())
         owned(record, cid)
         container_started = time.monotonic()

@@ -52,6 +52,38 @@ actual selected client/server and Java25 binaries.
 Changing configuration requires an explicit migration procedure; restarting
 with changed configuration fails closed.
 
+RDP records optionally accept the boolean `enable_drive` (default false).
+Enabled targets receive one virtual drive named `Files` at
+`/transfers/<target-alias>`. The host mounts a separate persistent transfers
+directory owned by guacd UID/GID2002 mode0700; PostgreSQL DATA permissions stay
+unchanged. Different target aliases have distinct subdirectories. This is a
+staging area for file exchange, not a backup: operators include or clear it
+separately from the PostgreSQL backup procedure.
+
+An isolated CURRENT migration may change only enable_drive settings, preserving
+all targets, credentials, certificate pins, portal policy and identity/TOTP.
+The parameter-only transaction retains complete before/after census guards and
+uses a distinct single-use `rdp-transfer-migration` journal. It does not archive
+or replace an earlier SSH/privacy migration journal. The host wrapper still
+requires a genuine independent normal restore and exact image/module binding.
+
+RDP `clipboard_buffer_size` optionally sets an explicit per-connection byte
+budget between262144 and52428800 inclusive. The default262144 is omitted from
+native parameters to preserve old catalogs. This budget must cover compressed
+PNG input, decoded RGBA and returned bitmap allocations individually. For
+example,32MiB covers a3840x2160RGBA screenshot; it is an explicit instance
+choice, not a new global default. The isolated parameter-only migration may
+also change this budget, with all endpoint/trust/credential identity preserved.
+
+This downstream native build accepts local `image/png` clipboard data for RDP
+and advertises a Windows bitmap clipboard format. Browser upload completion
+precedes forwarding the paste keystroke. Browser Clipboard API permission is
+still required for automatic reads; direct PNG paste events are supported when
+the browser supplies them. PNG conversion uses bounded heap allocations and
+composites transparency onto white for the compatible24-bit CF_DIB format.
+Other media files use the virtual drive; arbitrary rich clipboard formats and
+image copy from remote Windows back to the local browser are not implemented.
+
 `migrate` accepts a copied, stopped legacy PostgreSQL 16 cluster with no current
 receipt. The caller must independently verify that it is an isolated copy;
 the command cannot prove provenance. It validates the original singleton

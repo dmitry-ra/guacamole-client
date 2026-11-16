@@ -117,6 +117,11 @@ class ConfigurationTests(InertTests):
         changed = host.container_args({**release(), 'backend_loopback_port': 10081}, config(), RUN)
         self.assertIn('--publish=127.0.0.1:10081:8080', changed)
 
+    def test_file_transfer_mount_is_separate_from_database_and_opt_in(self):
+        expected = '--volume=/var/lib/guacamole-portal/transfers:/transfers:rw'
+        self.assertNotIn(expected, host.container_args(release(), config(), RUN))
+        self.assertIn(expected, host.container_args(release(), config(), RUN, enable_transfer=True))
+
     def test_engine_rotation_path_is_outside_every_container_writable_mount(self):
         args = host.container_args(release(), config(), RUN)
         prefix = '--log-opt=path='
@@ -323,6 +328,7 @@ class MarkerTests(InertTests):
 
 class LifecycleTests(InertTests):
     def harness(self, health, gate=True):
+        patch.object(host.catalog, 'load', return_value=SimpleNamespace(targets=[])).start()
         self.now = 0
         self.published = []
         def sleep(seconds): self.now += seconds

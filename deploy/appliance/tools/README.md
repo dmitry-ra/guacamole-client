@@ -1,5 +1,25 @@
 # Appliance developer tools
 
+- test_clipboard_images.cjs: exercises the actual Angular clipboard service,
+  ManagedClient and focused-client directive against controlled browser and
+  transport boundaries. PNG preference/bytes, text/permission fallback,
+  asynchronous upload/key ordering, finite ACK failure, direct paste and client
+  replacement cleanup are checked. Run `node tools/test_clipboard_images.cjs`.
+  This does not establish real browser permission or Windows clipboard behavior.
+
+- ../native/clipboard-image.c, patch_server.py and test-clipboard-image.c:
+  explicitly identified downstream addition to the locked guacd source. PNG
+  input is converted into a top-down 24-bit Windows CF_DIB with alpha composited
+  on white. Header dimensions, decoded allocation and output size are bounded
+  by the configured clipboard limit. The native image build runs malformed,
+  truncated, large-IHDR and known-pixel controls under AddressSanitizer and
+  UndefinedBehaviorSanitizer, then compiles the patched RDP library. The patch
+  adds PNG-only chunk ACKs/overflow refusal required by BlobWriter. Source
+  transformations require exact original contexts and fail on upstream drift.
+  Text behavior is preserved; remote-to-local image clipboard and other rich
+  clipboard formats are outside this change. The builder target is compile/test
+  evidence only and contains no accepted web application.
+
 - source_build.py and test_source_build.py: freeze the selected checkout's
   actual native source and build its WAR, PostgreSQL JDBC/TOTP/ban extensions
   and complete SQL schema with checksum-pinned Maven3.9.12 and JDK25. Native
