@@ -264,8 +264,9 @@ def build(args):
     names = ['Containerfile', 'runtime.py', 'catalog.py', 'lifecycle.py', 'current_migration.py',
              'krb5-local.conf', 'source-inputs-lock.json',
              'build-provenance.json', 'tools/build_image.py']
-    names += [str(p.relative_to(HERE)) for directory in ('java', 'web')
-              for p in sorted((HERE/directory).rglob('*')) if p.is_file()]
+    names += [str(p.relative_to(HERE)) for directory in ('java', 'web', 'native')
+              for p in sorted((HERE/directory).rglob('*'))
+              if p.is_file() and '__pycache__' not in p.parts]
     hashes = {}
     for name in names:
         path = HERE/name
@@ -277,13 +278,18 @@ def build(args):
     lock = verify_and_copy(args.inputs, frozen/'release')
     if json.loads((context/'source-inputs-lock.json').read_text()) != lock:
         raise RuntimeError('Source lock changed while freezing')
-    client = freeze_client(args.client_build, frozen/'client-source')
+    if args.target == 'builder':
+        (frozen/'client-source').mkdir(mode=0o700)
+        client = None
+    else:
+        client = freeze_client(args.client_build, frozen/'client-source')
     (frozen/'source-sha256.json').write_text(json.dumps(hashes, indent=2)+'\n')
     if args.command == 'verify':
         print(json.dumps({'verified_inputs': len(lock['sources']), 'frozen_context': str(frozen)}))
         return
     command = ['timeout', '--signal=TERM', '--kill-after=15s', '5400s',
                'nice', '-n', '10', 'podman', 'build', '--jobs', '1', '--pull=never',
+               '--target', args.target,
                '--build-context', 'release='+str((frozen/'release').resolve()),
                '--build-context', 'client_source='+str((frozen/'client-source').resolve()),
                '--tag', args.tag, '--file', context/'Containerfile', context]
@@ -292,13 +298,16 @@ def build(args):
         run(command, timeout=5430, stdout=log, stderr=subprocess.STDOUT)
     image = json.loads(run(['podman', 'image', 'inspect', args.tag], capture_output=True,
                            text=True).stdout)[0]
-    receipt = {'schema': 1, 'image_id': 'sha256:'+image['Id'].removeprefix('sha256:'),
+    receipt = {'schema': 1, 'build_target': args.target,
+               'image_id': 'sha256:'+image['Id'].removeprefix('sha256:'),
                'tag': args.tag, 'sources': hashes, 'frozen_context': str(frozen),
                'base_image': lock['base_image'], 'apt_snapshot': lock['apt_snapshot'],
-               'client_source_head': client['source']['head'],
-               'client_source_tree_sha256': client['source']['tree_sha256'],
-               'client_provenance_sha256': digest(frozen/'client-source/client-source-build.json'),
+               'client_source_head': client['source']['head'] if client else None,
+               'client_source_tree_sha256': client['source']['tree_sha256'] if client else None,
+               'client_provenance_sha256': digest(frozen/'client-source/client-source-build.json') if client else None,
                'server_source': lock['server']}
+    receipt['server_source_patches'] = {name:value for name,value in hashes.items()
+                                       if name.startswith('native/')}
     (frozen/'build-receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
     print(json.dumps(receipt))
 
@@ -312,6 +321,7 @@ def main():
         sub.add_argument('--inputs', required=True, type=Path)
         sub.add_argument('--client-build', required=True, type=Path)
         sub.add_argument('--tag', default='localhost/private-portal:development')
+        sub.add_argument('--target', choices=('builder', 'application'), default='application')
     sub = subs.add_parser('package')
     sub.add_argument('--source', required=True, type=Path)
     sub.add_argument('--javac', required=True, type=Path)
