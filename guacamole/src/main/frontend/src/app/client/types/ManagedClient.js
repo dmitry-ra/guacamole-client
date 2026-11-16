@@ -62,6 +62,12 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      */
     var THUMBNAIL_UPDATE_FREQUENCY = 5000;
 
+    // A disconnected clipboard stream must not hold queued keyboard input.
+    const CLIPBOARD_ACK_TIMEOUT = 15000;
+    const clipboardWrites = new WeakMap();
+    const supportsClipboard = (managedClient, data) =>
+            data.type !== 'image/png' || managedClient.protocol === 'rdp';
+
     /**
      * A deferred pipe stream, that has yet to be consumed, as well as all
      * axuilary information needed to pull data from the stream.
@@ -856,12 +862,20 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
      *
      * @param {ClipboardData} data
      *     The clipboard data to send.
+     *
+     * @returns {Promise<boolean>}
+     *     Resolves after end-of-stream has been sent, or false on failure.
      */
-    ManagedClient.setClipboard = function setClipboard(managedClient, data) {
+    const writeClipboard = function writeClipboard(managedClient, data) {
+
+        // The downstream PNG path is an RDP capability. SSH clipboard streams
+        // do not acknowledge binary chunks and must remain text-only.
+        if (!supportsClipboard(managedClient, data))
+            return $q.resolve(false);
 
         // Ignore clipboard data that was received from this connection
         if (data.source === managedClient.id)
-            return;
+            return $q.resolve(true);
 
         var writer;
 
@@ -873,22 +887,65 @@ angular.module('client').factory('ManagedClient', ['$rootScope', '$injector',
             writer = new Guacamole.StringWriter(stream);
             writer.sendText(data.data);
             writer.sendEnd();
+            return $q.resolve(true);
         }
 
         // Otherwise, assume the data is a File/Blob
         else {
 
             // Write File/Blob asynchronously
+            const deferred = $q.defer();
+            let deadline;
+            let settled = false;
+            const finish = function finish(success) {
+                if (!settled) {
+                    settled = true;
+                    $window.clearTimeout(deadline);
+                    deferred.resolve(success);
+                }
+            };
+            const resetDeadline = function resetDeadline() {
+                if (settled)
+                    return;
+                $window.clearTimeout(deadline);
+                deadline = $window.setTimeout(() => finish(false),
+                        CLIPBOARD_ACK_TIMEOUT);
+            };
+            resetDeadline();
             writer = new Guacamole.BlobWriter(stream);
+            writer.onack = function clipboardAck(status) {
+                if (status.isError())
+                    finish(false);
+                else
+                    resetDeadline();
+            };
+            writer.onerror = () => finish(false);
             writer.oncomplete = function clipboardSent() {
                 writer.sendEnd();
+                finish(true);
             };
 
             // Begin sending data
             writer.sendBlob(data.data);
+            return deferred.promise;
 
         }
 
+    };
+
+    // RDP has one clipboard buffer, not one buffer per upload stream. Initial
+    // connection sync and focus sync must therefore finish in the same order.
+    ManagedClient.setClipboard = function setClipboard(managedClient, data) {
+        if (!supportsClipboard(managedClient, data))
+            return $q.resolve(false);
+        const selected = managedClient.client;
+        const snapshot = new ClipboardData(data);
+        const previous = clipboardWrites.get(managedClient) || $q.resolve();
+        const send = () => selected === managedClient.client
+                ? writeClipboard(managedClient, snapshot) : false;
+        const next = previous.then(send, send);
+        clipboardWrites.set(managedClient, next);
+        return next;
     };
 
     /**

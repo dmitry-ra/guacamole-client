@@ -56,6 +56,24 @@ angular.module('client').directive('guacClient', [function guacClient() {
         // Required services
         const $rootScope = $injector.get('$rootScope');
         const $window = $injector.get('$window');
+        const $q = $injector.get('$q');
+        const clipboardService = $injector.get('clipboardService');
+        const ClipboardData = $injector.get('ClipboardData');
+
+        const CONTROL_LEFT = Guacamole.Keyboard.Keysym.CTRL_L;
+        const PASTE_KEY = 'v'.charCodeAt(0);
+        let pendingInput = $q.resolve();
+        let pendingClipboard = $q.resolve(true);
+
+        // Preserve keydown/keyup order while a PNG is being acknowledged.
+        // A clipboard result for an old client must never reach a new client.
+        const queueInput = function queueInput(action) {
+            const selected = client;
+            pendingInput = pendingInput.catch(angular.noop).then(() => {
+                if (selected && selected === client)
+                    return action(selected);
+            });
+        };
             
         /**
          * Whether the local, hardware mouse cursor is in use.
@@ -381,6 +399,10 @@ angular.module('client').directive('guacClient', [function guacClient() {
 
             // Remove any existing display
             displayContainer.innerHTML = "";
+            client = null;
+            display = null;
+            pendingInput = $q.resolve();
+            pendingClipboard = $q.resolve(true);
 
             // Only proceed if a client is given 
             if (!managedClient)
@@ -621,21 +643,36 @@ angular.module('client').directive('guacClient', [function guacClient() {
 
         // Update remote clipboard if local clipboard changes
         $scope.$on('guacClipboard', function onClipboard(event, data) {
-            ManagedClient.setClipboard($scope.client, data);
+            pendingClipboard = ManagedClient.setClipboard($scope.client, data);
         });
 
         // Translate local keydown events to remote keydown events if keyboard is enabled
         $scope.$on('guacKeydown', function keydownListener(event, keysym, keyboard) {
             if ($scope.client.clientProperties.focused) {
-                client.sendKeyEvent(1, keysym);
                 event.preventDefault();
+                const paste = String.fromCharCode(keysym).toLowerCase() === 'v'
+                        && (keyboard.modifiers.ctrl || keyboard.modifiers.command)
+                        && !keyboard.modifiers.alt;
+                // Read within the user's gesture, before asynchronous queuing.
+                const localClipboard = paste ? clipboardService.getClipboard() : null;
+                const selected = $scope.client;
+                queueInput(async target => {
+                    await pendingClipboard;
+                    const data = localClipboard ? await localClipboard : null;
+                    if (selected !== $scope.client || target !== client)
+                        return;
+                    if (data && !await ManagedClient.setClipboard(selected, data))
+                        return;
+                    if (target === client)
+                        target.sendKeyEvent(1, keysym);
+                });
             }
         });
         
         // Translate local keyup events to remote keyup events if keyboard is enabled
         $scope.$on('guacKeyup', function keyupListener(event, keysym, keyboard) {
             if ($scope.client.clientProperties.focused) {
-                client.sendKeyEvent(0, keysym);
+                queueInput(target => target.sendKeyEvent(0, keysym));
                 event.preventDefault();
             }   
         });
@@ -643,14 +680,48 @@ angular.module('client').directive('guacClient', [function guacClient() {
         // Universally handle all synthetic keydown events
         $scope.$on('guacSyntheticKeydown', function syntheticKeydownListener(event, keysym) {
             if ($scope.client.clientProperties.focused)
-                client.sendKeyEvent(1, keysym);
+                queueInput(target => target.sendKeyEvent(1, keysym));
         });
         
         // Universally handle all synthetic keyup events
         $scope.$on('guacSyntheticKeyup', function syntheticKeyupListener(event, keysym) {
             if ($scope.client.clientProperties.focused)
-                client.sendKeyEvent(0, keysym);
+                queueInput(target => target.sendKeyEvent(0, keysym));
         });
+
+        // Context-menu paste can provide a screenshot even when the browser
+        // does not grant the asynchronous Clipboard API permission.
+        const pasteImage = function pasteImage(event) {
+            if ($scope.client.protocol !== 'rdp' || !$scope.client.clientProperties.focused || !event.clipboardData
+                    || (event.target !== $window.document.body && !main.contains(event.target)))
+                return;
+            const element = event.target;
+            if (element.isContentEditable || /^(INPUT|TEXTAREA)$/.test(element.tagName))
+                return;
+            const image = Array.from(event.clipboardData.items).find(
+                    item => item.kind === 'file' && item.type === 'image/png');
+            if (!image)
+                return;
+            const blob = image.getAsFile();
+            if (!blob)
+                return;
+            event.preventDefault();
+            const selected = $scope.client;
+            queueInput(async target => {
+                await pendingClipboard;
+                if (selected !== $scope.client || !await ManagedClient.setClipboard(
+                        selected, new ClipboardData({type: 'image/png', data: blob})))
+                    return;
+                if (target !== client)
+                    return;
+                target.sendKeyEvent(1, CONTROL_LEFT);
+                target.sendKeyEvent(1, PASTE_KEY);
+                target.sendKeyEvent(0, PASTE_KEY);
+                target.sendKeyEvent(0, CONTROL_LEFT);
+            });
+        };
+        $window.addEventListener('paste', pasteImage);
+        $scope.$on('$destroy', () => $window.removeEventListener('paste', pasteImage));
 
         // Track clipboard synchronization status
         $rootScope.$on('clipboardSyncInProgress', function clipboardSyncStatus(event, status) {

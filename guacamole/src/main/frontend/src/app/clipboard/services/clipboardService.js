@@ -448,6 +448,33 @@ angular.module('clipboard').factory('clipboardService', ['$injector',
 
         try {
 
+            // Prefer the lossless screenshot format when both image and text
+            // representations are available. Never interpret HTML as an image.
+            if (navigator.clipboard && navigator.clipboard.read) {
+                navigator.clipboard.read().then(async function clipboardRead(items) {
+                    for (const item of items) {
+                        if (item.types.includes('image/png')) {
+                            deferred.resolve(new ClipboardData({
+                                type : 'image/png',
+                                data : await item.getType('image/png')
+                            }));
+                            return;
+                        }
+                    }
+                    for (const item of items) {
+                        if (item.types.includes('text/plain')) {
+                            deferred.resolve(new ClipboardData({
+                                type : 'text/plain',
+                                data : await (await item.getType('text/plain')).text()
+                            }));
+                            return;
+                        }
+                    }
+                    deferred.reject();
+                }).catch(deferred.reject);
+                return deferred.promise;
+            }
+
             // Attempt to read the clipboard using the Asynchronous Clipboard
             // API, if it's available
             if (navigator.clipboard && navigator.clipboard.readText) {
@@ -580,6 +607,12 @@ angular.module('clipboard').factory('clipboardService', ['$injector',
         return getLocalClipboard().then((data) => storedClipboardData(data), () => storedClipboardData());
     };
 
+    const publishClipboard = function publishClipboard(data) {
+        storedClipboardData(data);
+        $rootScope.$broadcast('guacClipboard', data);
+        $rootScope.$broadcast('clipboardSyncInProgress', false);
+    };
+
     /**
      * Sets the content of the internal clipboard shared across all active
      * Guacamole connections running within the current browser tab. If
@@ -601,9 +634,7 @@ angular.module('clipboard').factory('clipboardService', ['$injector',
 
             // Update internal clipboard and broadcast event notifying of
             // updated contents
-            storedClipboardData(data);
-            $rootScope.$broadcast('guacClipboard', data);
-            $rootScope.$broadcast('clipboardSyncInProgress', false);
+            publishClipboard(data);
 
         });
     };
@@ -617,8 +648,10 @@ angular.module('clipboard').factory('clipboardService', ['$injector',
      */
     service.resyncClipboard = function resyncClipboard() {
         $rootScope.$broadcast('clipboardSyncInProgress', true);
-        getLocalClipboard().then(function clipboardRead(data) {
-            return service.setClipboard(data);
+        return getLocalClipboard().then(function clipboardRead(data) {
+            // This data already came from the local clipboard. Writing it
+            // back is unnecessary and can destroy image data in text fallbacks.
+            publishClipboard(data);
         }, function clipboardReadFailed() {
             // Clipboard sync state must be cleared on failure so that
             // handleMouseEvents(e) won't be blocked.
